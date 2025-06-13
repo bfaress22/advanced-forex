@@ -3,6 +3,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Import FX Dashboard Styles */
+@import './styles/fx-dashboard.css';
+
 @layer base {
   :root {
     --background: 220 33% 98%;

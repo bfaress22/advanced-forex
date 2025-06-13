@@ -48,8 +48,28 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
       // Utilise la quantité avec son signe (+ pour achat, - pour vente)
       const quantity = option.quantity / 100;
       
-      // Calculate option premium (simplified)
-      const premium = 0.01 * Math.abs(quantity); // Prime simplifiée, toujours positive
+      // Calculate option premium (more realistic)
+      let premium = 0.01 * Math.abs(quantity); // Fallback simple premium
+      
+      // For digital options, try to use more realistic premium calculation
+      if (['one-touch', 'no-touch', 'double-touch', 'double-no-touch', 'range-binary', 'outside-binary'].includes(option.type)) {
+        const barrier = option.barrierType === 'percent' 
+          ? spot * (option.barrier / 100) 
+          : option.barrier;
+        const rebateDecimal = (option.rebate || 5) / 100;
+        
+        // Approximation simple: premium = probability * rebate * discount factor
+        // Plus proche de la barrière = plus de probabilité d'activation
+        let probApprox = 0.5; // Probabilité par défaut
+        
+        if (option.type === 'one-touch') {
+          probApprox = currentSpot >= barrier ? 1 : Math.min(0.8, (currentSpot / barrier) * 0.6);
+        } else if (option.type === 'no-touch') {
+          probApprox = currentSpot < barrier ? Math.max(0.2, 1 - (currentSpot / barrier) * 0.6) : 0;
+        }
+        
+        premium = probApprox * rebateDecimal * 0.95; // 5% discount factor
+      }
       
       if (option.type === 'put') {
         // PUT: La logique change selon achat ou vente - INVERSION COMPLÈTE
@@ -161,12 +181,20 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           ? spot * (option.barrier / 100) 
           : option.barrier;
         
-        // Appliquer le rebate en % du volume mensuel au lieu d'une valeur fixe
-        // La quantité représente le % du volume total qui est couvert
+        // Appliquer le rebate correctement en fonction du volume et de la quantité
         if (currentSpot >= barrier) {
-          // Utiliser rebate comme pourcentage du volume (que la quantité couvre déjà)
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Le rebate s'applique comme pourcentage du volume, pondéré par la quantité
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          // Impact positif du rebate sur le taux de change effectif
+          if (quantity > 0) {
+            // Position longue: rebate améliore le taux (réduction effective)
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            // Position courte: rebate détériore le taux (coût effectif)
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       else if (option.type.includes('no-touch')) {
@@ -175,9 +203,15 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           : option.barrier;
         
         if (currentSpot < barrier) {
-          // Utiliser rebate comme pourcentage du volume
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Même logique que one-touch pour l'impact du rebate
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          if (quantity > 0) {
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       else if (option.type.includes('double-touch')) {
@@ -189,9 +223,15 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           : option.secondBarrier;
         
         if (currentSpot >= barrier1 || currentSpot <= barrier2) {
-          // Utiliser rebate comme pourcentage du volume
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Même logique que one-touch pour l'impact du rebate
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          if (quantity > 0) {
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       else if (option.type.includes('double-no-touch')) {
@@ -203,9 +243,15 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           : option.secondBarrier;
         
         if (currentSpot < barrier1 && currentSpot > barrier2) {
-          // Utiliser rebate comme pourcentage du volume
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Même logique que no-touch pour l'impact du rebate
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          if (quantity > 0) {
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       else if (option.type === 'range-binary') {
@@ -217,9 +263,15 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           : option.strike;
         
         if (currentSpot <= upperBound && currentSpot >= lowerBound) {
-          // Utiliser rebate comme pourcentage du volume
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Même logique que les autres options digitales pour l'impact du rebate
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          if (quantity > 0) {
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       else if (option.type === 'outside-binary') {
@@ -231,9 +283,15 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
           : option.strike;
         
         if (currentSpot > upperBound || currentSpot < lowerBound) {
-          // Utiliser rebate comme pourcentage du volume
-          const rebateAmount = ((option.rebate || 5) / 100) * Math.abs(quantity) * 100;
-          hedgedRate = currentSpot + rebateAmount;
+          // Même logique que les autres options digitales pour l'impact du rebate
+          const rebateDecimal = (option.rebate || 5) / 100;
+          const volumeImpact = rebateDecimal * Math.abs(quantity);
+          
+          if (quantity > 0) {
+            hedgedRate = currentSpot * (1 - volumeImpact);
+          } else {
+            hedgedRate = currentSpot * (1 + volumeImpact);
+          }
         }
       }
       
@@ -248,8 +306,9 @@ const generateFXHedgingData = (strategy: any[], spot: number, includePremium: bo
     });
 
     // Ajuster pour la prime si incluse
+    // La prime payée augmente le coût effectif du taux de change
     if (includePremium && strategy.length > 0) {
-      hedgedRate -= totalPremium;
+      hedgedRate += totalPremium;
     }
 
     data.push({

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { Layout } from "@/components/Layout";
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Trash2, ChevronDown, ChevronUp } from 'lucide-react';
@@ -303,7 +304,14 @@ const SavedScenarios = () => {
   };
 
   return (
-    <div className="w-full max-w-6xl mx-auto p-4 space-y-6">
+    <Layout 
+      title="Saved Scenarios"
+      breadcrumbs={[
+        { label: "Dashboard", href: "/" },
+        { label: "Saved Scenarios" }
+      ]}
+    >
+      <div className="w-full max-w-6xl mx-auto space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Saved Scenarios</h1>
         <Link to="/">
@@ -543,8 +551,8 @@ const SavedScenarios = () => {
                               <tr key={i}>
                                 <td className="border p-2">{row.date}</td>
                                 <td className="border p-2">{row.timeToMaturity.toFixed(4)}</td>
-                                <td className="border p-2">{row.forward.toFixed(2)}</td>
-                                <td className="border p-2">{row.realPrice.toFixed(2)}</td>
+                                                        <td className="border p-2">{row.forward.toFixed(4)}</td>
+                        <td className="border p-2">{row.realPrice.toFixed(4)}</td>
                                 <td className="border p-2">
                                   {impliedVol !== null 
                                     ? (impliedVol * 100).toFixed(0) 
@@ -856,6 +864,7 @@ const SavedScenarios = () => {
         </>
       )}
     </div>
+    </Layout>
   );
 };
 

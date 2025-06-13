@@ -1,0 +1,324 @@
+/* FX Risk Management Dashboard Styles */
+
+/* Financial Data Tables */
+.fx-table {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+}
+
+.fx-rate {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* P&L Colors */
+.pnl-positive {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.pnl-negative {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.pnl-neutral {
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* Risk Level Indicators */
+.risk-low {
+  background: linear-gradient(90deg, #dcfce7 0%, #bbf7d0 100%);
+  border: 1px solid #16a34a;
+  color: #15803d;
+}
+
+.risk-medium {
+  background: linear-gradient(90deg, #fef3c7 0%, #fde68a 100%);
+  border: 1px solid #d97706;
+  color: #b45309;
+}
+
+.risk-high {
+  background: linear-gradient(90deg, #fecaca 0%, #fca5a5 100%);
+  border: 1px solid #dc2626;
+  color: #b91c1c;
+}
+
+/* Market Status Indicators */
+.market-live {
+  position: relative;
+}
+
+.market-live::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: #16a34a;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(22, 163, 74, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+  }
+}
+
+/* Currency Badge Styles */
+.currency-badge-eur {
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  color: white;
+  border: none;
+}
+
+.currency-badge-gbp {
+  background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
+  color: white;
+  border: none;
+}
+
+.currency-badge-jpy {
+  background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+  color: white;
+  border: none;
+}
+
+.currency-badge-chf {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  color: white;
+  border: none;
+}
+
+.currency-badge-usd {
+  background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+  color: white;
+  border: none;
+}
+
+/* Hedge Ratio Progress Bars */
+.hedge-progress-high {
+  background: linear-gradient(90deg, #16a34a 0%, #22c55e 100%);
+}
+
+.hedge-progress-medium {
+  background: linear-gradient(90deg, #d97706 0%, #f59e0b 100%);
+}
+
+.hedge-progress-low {
+  background: linear-gradient(90deg, #dc2626 0%, #ef4444 100%);
+}
+
+/* Financial Cards */
+.finance-card {
+  background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  transition: all 0.2s ease-in-out;
+}
+
+.finance-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+}
+
+.dark .finance-card {
+  background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
+  border: 1px solid #334155;
+}
+
+/* Alert Styles */
+.alert-critical {
+  background: linear-gradient(90deg, #fef2f2 0%, #fecaca 100%);
+  border-left: 4px solid #dc2626;
+  animation: alertPulse 2s infinite;
+}
+
+.alert-warning {
+  background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 100%);
+  border-left: 4px solid #d97706;
+}
+
+.alert-info {
+  background: linear-gradient(90deg, #eff6ff 0%, #dbeafe 100%);
+  border-left: 4px solid #2563eb;
+}
+
+@keyframes alertPulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* Trading Terminal Styles */
+.trading-terminal {
+  background: #0a0e13;
+  color: #00ff88;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+}
+
+.trading-terminal .rate-up {
+  color: #00ff88;
+  animation: flashGreen 0.5s ease-in-out;
+}
+
+.trading-terminal .rate-down {
+  color: #ff4757;
+  animation: flashRed 0.5s ease-in-out;
+}
+
+@keyframes flashGreen {
+  0% { background-color: rgba(0, 255, 136, 0.3); }
+  100% { background-color: transparent; }
+}
+
+@keyframes flashRed {
+  0% { background-color: rgba(255, 71, 87, 0.3); }
+  100% { background-color: transparent; }
+}
+
+/* Responsive Grid */
+.fx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 768px) {
+  .fx-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .fx-rate {
+    font-size: 0.875rem;
+  }
+  
+  .finance-card {
+    margin: 0.5rem 0;
+  }
+}
+
+/* Custom Scrollbars */
+.fx-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.fx-scrollbar::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.fx-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.fx-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Loading States */
+.fx-loading {
+  animation: skeletonPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skeletonPulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Sidebar Enhancements */
+.fx-sidebar {
+  background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+  border-right: 1px solid #334155;
+}
+
+.fx-sidebar-item {
+  transition: all 0.2s ease-in-out;
+  border-radius: 0.5rem;
+  margin: 0.125rem 0;
+}
+
+.fx-sidebar-item:hover {
+  background: rgba(59, 130, 246, 0.1);
+  transform: translateX(2px);
+}
+
+.fx-sidebar-item.active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.2) 0%, rgba(59, 130, 246, 0.1) 100%);
+  border-left: 3px solid #3b82f6;
+}
+
+/* Chart Enhancements */
+.fx-chart-container {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+/* Bloomberg-style Terminal */
+.bloomberg-terminal {
+  background: #000000;
+  color: #ffcc00;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.bloomberg-terminal .header {
+  background: #ffcc00;
+  color: #000000;
+  padding: 0.25rem 0.5rem;
+  font-weight: bold;
+}
+
+.bloomberg-terminal .data-row {
+  border-bottom: 1px solid #333333;
+  padding: 0.25rem;
+}
+
+.bloomberg-terminal .data-row:hover {
+  background: #1a1a1a;
+}
+
+/* Print Styles */
+@media print {
+  .fx-sidebar,
+  .fx-controls,
+  .no-print {
+    display: none !important;
+  }
+  
+  .finance-card {
+    box-shadow: none !important;
+    border: 1px solid #000 !important;
+  }
+  
+  .pnl-positive,
+  .pnl-negative {
+    color: #000 !important;
+  }
+} 
