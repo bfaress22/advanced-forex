@@ -19,11 +19,12 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import StrategyImportService from '../services/StrategyImportService';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { Plus, Trash2, Save, X, AlertTriangle, Table, PlusCircle, Trash } from 'lucide-react';
+import { Plus, Trash2, Save, X, AlertTriangle, Table, PlusCircle, Trash, Upload } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link } from 'react-router-dom';
 import { CalculatorState, CustomPeriod } from '@/types/CalculatorState';
@@ -769,24 +770,109 @@ const Index = () => {
         
         // Use custom option prices if enabled
         const optionKey = `${option.type}-${optionIndex}`;
-        if (useCustomOptionPrices && customOptionPrices[monthKey]?.[optionKey]) {
+        if (useCustomOptionPrices && customOptionPrices[monthKey]?.[optionKey] !== undefined) {
           option.price = customOptionPrices[monthKey][optionKey];
         } else {
           // Otherwise recalculate price with current parameters
-          // Note: Pass date to calculateOptionPrice to use implied volatility if available
-          option.price = calculateOptionPrice(
-            option.type, 
-            result.forward, 
-            strike, 
-            params.domesticRate/100, 
-            result.timeToMaturity,
-            option.type.includes('swap') ? 0 : 
-            option.type.includes('barrier') || option.type.includes('knockout') || option.type.includes('knockin') ? 
-              (strategy.find(opt => opt.type === option.type)?.volatility || 20) / 100 :
-              (strategy.find(opt => opt.type === option.type)?.volatility || 20) / 100,
-            date, // Pass date to use implied volatility if enabled
-            optionIndex // Pass optionIndex to use option-specific IV
-          );
+          let volatilityToUse;
+          
+          if (useImpliedVol && impliedVolatilities[monthKey]) {
+            // Use implied volatility if available
+            const iv = getImpliedVolatility(monthKey, optionKey);
+            volatilityToUse = (iv !== undefined && iv !== null) ? iv / 100 : 
+              (strategy.find(opt => opt.type === option.type)?.volatility || 20) / 100;
+          } else {
+            // Use strategy volatility
+            volatilityToUse = (strategy.find(opt => opt.type === option.type)?.volatility || 20) / 100;
+          }
+          
+          // Calculate price with proper volatility
+          if (option.type === 'forward') {
+            option.price = (result.forward - strike) * Math.exp(-params.domesticRate/100 * result.timeToMaturity);
+          } else if (option.type === 'call' || option.type === 'put') {
+            option.price = calculateGarmanKohlhagenPrice(
+              option.type,
+              result.forward,
+              strike,
+              params.domesticRate/100,
+              params.foreignRate/100,
+              result.timeToMaturity,
+              volatilityToUse
+            );
+          } else if (option.type.includes('knockout') || option.type.includes('knockin')) {
+            // For barrier options, use the appropriate calculation
+            const strategyOption = strategy.find(opt => opt.type === option.type);
+            if (strategyOption) {
+              const barrier = strategyOption.barrierType === 'percent' ? 
+                params.spotPrice * (strategyOption.barrier / 100) : 
+                strategyOption.barrier;
+                
+              const secondBarrier = option.type.includes('double') ? 
+                (strategyOption.barrierType === 'percent' ? 
+                  params.spotPrice * (strategyOption.secondBarrier / 100) : 
+                  strategyOption.secondBarrier) : 
+                undefined;
+                
+              if (barrierPricingModel === 'closed-form') {
+                option.price = calculateBarrierOptionClosedForm(
+                  option.type,
+                  result.forward,
+                  strike,
+                  params.domesticRate/100,
+                  result.timeToMaturity,
+                  volatilityToUse,
+                  barrier,
+                  secondBarrier
+                );
+              } else {
+                option.price = calculateBarrierOptionPrice(
+                  option.type,
+                  result.forward,
+                  strike,
+                  params.domesticRate/100,
+                  result.timeToMaturity,
+                  volatilityToUse,
+                  barrier,
+                  secondBarrier,
+                  barrierOptionSimulations
+                );
+              }
+            }
+          } else if (
+            option.type.includes('one-touch') ||
+            option.type.includes('double-touch') ||
+            option.type.includes('no-touch') ||
+            option.type.includes('double-no-touch') ||
+            option.type.includes('range-binary') ||
+            option.type.includes('outside-binary')
+          ) {
+            // For digital options
+            const strategyOption = strategy.find(opt => opt.type === option.type);
+            if (strategyOption) {
+              const barrier = strategyOption.barrierType === 'percent' ? 
+                params.spotPrice * (strategyOption.barrier / 100) : 
+                strategyOption.barrier;
+                
+              const secondBarrier = option.type.includes('double') ? 
+                (strategyOption.barrierType === 'percent' ? 
+                  params.spotPrice * (strategyOption.secondBarrier / 100) : 
+                  strategyOption.secondBarrier) : 
+                undefined;
+                
+              option.price = calculateDigitalOptionPrice(
+                option.type,
+                result.forward,
+                strike,
+                params.domesticRate / 100,
+                result.timeToMaturity,
+                volatilityToUse,
+                barrier,
+                secondBarrier,
+                10000,
+                strategyOption.rebate ?? 1
+              );
+            }
+          }
         }
       });
       
@@ -873,17 +959,19 @@ const Index = () => {
     numSimulations: number = 10000,
     rebate: number = 1
   ) => {
-    // Facteur d'échelle pour rendre les prix des options digitales plus réalistes
-    // Les options digitales ont tendance à être sous-évaluées avec la méthode Monte Carlo simple
-    
+    // Conversion du rebate en pourcentage
+    const rebateDecimal = rebate / 100;
     
     let payoutSum = 0;
-    const dt = t / 252;
+    // Amélioration de la précision de la simulation
+    const stepsPerDay = 4;
+    const totalSteps = Math.max(252 * t * stepsPerDay, 50);
+    const dt = t / totalSteps;
     for (let sim = 0; sim < numSimulations; sim++) {
       let price = S;
       let touched = false;
       let touchedSecond = false;
-      for (let day = 0; day < 252; day++) {
+      for (let step = 0; step < totalSteps; step++) {
         const z = Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
         price = price * Math.exp((r - 0.5 * sigma * sigma) * dt + sigma * Math.sqrt(dt) * z);
         switch (optionType) {
@@ -910,27 +998,27 @@ const Index = () => {
       }
       switch (optionType) {
         case 'one-touch':
-          if (touched) payoutSum += rebate;
+          if (touched) payoutSum += rebateDecimal;
           break;
         case 'no-touch':
-          if (!touched) payoutSum += rebate;
+          if (!touched) payoutSum += rebateDecimal;
           break;
         case 'double-touch':
-          if (touched && touchedSecond) payoutSum += rebate;
+          if (touched || touchedSecond) payoutSum += rebateDecimal;
           break;
         case 'double-no-touch':
-          if (!touched) payoutSum += rebate;
+          if (!touched) payoutSum += rebateDecimal;
           break;
         case 'range-binary':
-          if (touched) payoutSum += rebate;
+          if (touched) payoutSum += rebateDecimal;
           break;
         case 'outside-binary':
-          if (touched) payoutSum += rebate;
+          if (touched) payoutSum += rebateDecimal;
           break;
       }
     }
-    // Appliquer le facteur d'échelle pour obtenir un prix d'option plus réaliste
-    return Math.exp(-r * t) * (payoutSum / numSimulations) * 100;
+    // Retourner le prix sans facteur d'échelle arbitraire
+    return Math.exp(-r * t) * (payoutSum / numSimulations);
   };
 
   // Modify the calculateOptionPrice function to handle barrier options
@@ -1410,6 +1498,11 @@ const Index = () => {
         } else if (option.type === 'swap') {
           // For swaps, premium is typically negligible for payoff diagrams
           optionPremium = 0;
+        } else if (['one-touch', 'no-touch', 'double-touch', 'double-no-touch', 'range-binary', 'outside-binary'].includes(option.type)) {
+          // Pour les options digitales, utiliser une approximation simple pour les graphiques de payoff
+          const rebateDecimal = (option.rebate || 5) / 100;
+          // Approximation simple : prime = probability * rebate * discount factor
+          optionPremium = 0.5 * rebateDecimal * Math.exp(-params.domesticRate/100 * 1);
         }
 
         // Calculate payoff at this price point
@@ -1500,6 +1593,46 @@ const Index = () => {
             // Pour les options Knock-In, le payoff n'est non-nul que si la barrière est franchie
             payoff = isBarrierBroken ? basePayoff : 0;
           }
+        } else if (['one-touch', 'no-touch', 'double-touch', 'double-no-touch', 'range-binary', 'outside-binary'].includes(option.type)) {
+          // Calcul du payoff pour les options digitales
+          const barrier = option.barrierType === 'percent' ? 
+            params.spotPrice * (option.barrier / 100) : 
+            option.barrier;
+          const secondBarrier = option.secondBarrier ? 
+            (option.barrierType === 'percent' ? 
+              params.spotPrice * (option.secondBarrier / 100) : 
+              option.secondBarrier) : undefined;
+          
+          const rebateDecimal = (option.rebate || 5) / 100;
+          let conditionMet = false;
+          
+          switch(option.type) {
+            case 'one-touch':
+              conditionMet = price >= barrier;
+              break;
+            case 'no-touch':
+              conditionMet = price < barrier;
+              break;
+            case 'double-touch':
+              conditionMet = price >= barrier || (secondBarrier && price <= secondBarrier);
+              break;
+            case 'double-no-touch':
+              conditionMet = price < barrier && (!secondBarrier || price > secondBarrier);
+              break;
+            case 'range-binary':
+              const upperBound = Math.max(barrier, secondBarrier || 0);
+              const lowerBound = Math.min(barrier, secondBarrier || Infinity);
+              conditionMet = price <= upperBound && price >= lowerBound;
+              break;
+            case 'outside-binary':
+              const upperBound2 = Math.max(barrier, secondBarrier || 0);
+              const lowerBound2 = Math.min(barrier, secondBarrier || Infinity);
+              conditionMet = price > upperBound2 || price < lowerBound2;
+              break;
+          }
+          
+          // Pour les options digitales, le payoff est le rebate si condition remplie, 0 sinon
+          payoff = conditionMet ? rebateDecimal : 0;
         }
         
         // Subtract premium for net payoff
@@ -2029,18 +2162,25 @@ const Index = () => {
         const optionId = `${option.type}-${optIndex}`;
         const isKnockedOut = option.type.includes('knockout') && barrierCrossings[optionId] && barrierCrossings[optionId][i];
         
-        // Pour les options knocked out, nous calculons toujours le prix même si l'option est knocked out
-        // Le prix représente la valeur théorique de l'option, indépendamment de son état knocked out
-        if (option.type === 'forward') {
-          // For forwards, the value is simply the difference between forward rate and strike
-          price = (forward - strike) * Math.exp(-params.domesticRate/100 * t);
-        } else if (option.type === 'call' || option.type === 'put') {
-          // Utiliser la volatilité implicite spécifique à l'option si disponible
-          const optionKey = `${option.type}-${optIndex}`;
-          const iv = getImpliedVolatility(monthKey, optionKey);
-          const effectiveSigma = useImpliedVol && iv !== undefined && iv !== null
-            ? iv / 100
-            : option.volatility / 100;
+        // Check if we should use custom prices first
+        const optionKey = `${option.type}-${optIndex}`;
+        if (useCustomOptionPrices && customOptionPrices[monthKey]?.[optionKey] !== undefined) {
+          // Use custom price if available
+          price = customOptionPrices[monthKey][optionKey];
+        } else {
+          // Calculate price normally
+          
+          // Pour les options knocked out, nous calculons toujours le prix même si l'option est knocked out
+          // Le prix représente la valeur théorique de l'option, indépendamment de son état knocked out
+          if (option.type === 'forward') {
+            // For forwards, the value is simply the difference between forward rate and strike
+            price = (forward - strike) * Math.exp(-params.domesticRate/100 * t);
+          } else if (option.type === 'call' || option.type === 'put') {
+            // Utiliser la volatilité implicite spécifique à l'option si disponible
+            const iv = getImpliedVolatility(monthKey, optionKey);
+            const effectiveSigma = useImpliedVol && iv !== undefined && iv !== null
+              ? iv / 100
+              : option.volatility / 100;
           // For standard options, use appropriate pricing model
           if (optionPricingModel === 'garman-kohlhagen') {
             price = calculateGarmanKohlhagenPrice(
@@ -2180,6 +2320,7 @@ const Index = () => {
             option.rebate ?? 1
           );
         }
+        } // Fermer le bloc else
             
         return {
           type: option.type,
@@ -2359,10 +2500,19 @@ const Index = () => {
       // Calculer le prix couvert (hedged price) en tenant compte des swaps et du prix réel
         const hedgedPrice = totalSwapPercentage * swapPrice + (1 - totalSwapPercentage) * realPrice;
 
+      // Vérifier si la stratégie contient des options digitales
+      const hasDigitalOptions = strategy.some(opt => 
+        ['one-touch', 'no-touch', 'double-touch', 'double-no-touch', 'range-binary', 'outside-binary'].includes(opt.type)
+      );
+
       // Calculer le coût hedgé selon la formule d'origine
+      // Pour les options digitales, totalPayoff est déjà multiplié par le volume
         const hedgedCost = -(monthlyVolume * hedgedPrice) - 
             (monthlyVolume * (1 - totalSwapPercentage) * strategyPrice) + 
-            (monthlyVolume * (1 - totalSwapPercentage) * totalPayoff);
+          (hasDigitalOptions ? 
+            ((1 - totalSwapPercentage) * totalPayoff) : 
+            (monthlyVolume * (1 - totalSwapPercentage) * totalPayoff)
+          );
       
       // Calculer le coût non hedgé selon la formule d'origine
       const unhedgedCost = -(monthlyVolume * realPrice);
@@ -2595,6 +2745,56 @@ const Index = () => {
     localStorage.setItem('optionScenarios', JSON.stringify(savedScenarios));
 
     alert('Scenario saved successfully!');
+  };
+
+  const importToHedgingInstruments = () => {
+    if (!strategy || strategy.length === 0) {
+      alert('Please add at least one strategy component first');
+      return;
+    }
+
+    if (!params.currencyPair) {
+      alert('Please select a currency pair first');
+      return;
+    }
+
+    const strategyName = prompt('Enter a name for this strategy:');
+    if (!strategyName) return;
+
+    try {
+      const importService = StrategyImportService.getInstance();
+      
+      // Prepare detailed results data for import
+      let detailedResultsData = null;
+      if (results && results.length > 0) {
+        // Enhance results with implied volatility data
+        detailedResultsData = results.map(result => ({
+          ...result,
+          impliedVolatilities: impliedVolatilities[result.date] || {}
+        }));
+      }
+      
+      const strategyId = importService.importStrategy(strategyName, strategy, {
+        currencyPair: params.currencyPair,
+        spotPrice: params.spotPrice,
+        startDate: params.startDate,
+        monthsToHedge: params.monthsToHedge,
+        baseVolume: params.baseVolume,
+        quoteVolume: params.quoteVolume,
+        domesticRate: params.domesticRate,
+        foreignRate: params.foreignRate,
+        useCustomPeriods: params.useCustomPeriods,
+        customPeriods: params.customPeriods,
+      }, detailedResultsData);
+
+      // Dispatch custom event to notify HedgingInstruments page
+      window.dispatchEvent(new CustomEvent('hedgingInstrumentsUpdated'));
+
+      alert(`Strategy "${strategyName}" exported successfully to Hedging Instruments!\nStrategy ID: ${strategyId}`);
+    } catch (error) {
+      console.error('Error exporting strategy:', error);
+      alert('Error exporting strategy. Please try again.');
+    }
   };
 
   // Save state when important values change
@@ -2957,11 +3157,13 @@ const Index = () => {
     
     // If an optionKey is provided and that specific IV exists, return it
     if (optionKey && impliedVolatilities[monthKey][optionKey] !== undefined) {
-      return impliedVolatilities[monthKey][optionKey];
+      const vol = impliedVolatilities[monthKey][optionKey];
+      return (vol !== null && vol !== undefined && !isNaN(vol) && vol > 0) ? vol : null;
     }
     
     // Otherwise fall back to the global month IV
-    return impliedVolatilities[monthKey].global;
+    const globalVol = impliedVolatilities[monthKey].global;
+    return (globalVol !== null && globalVol !== undefined && !isNaN(globalVol) && globalVol > 0) ? globalVol : null;
   };
   
   // New function to handle per-option implied volatility changes
@@ -4778,7 +4980,9 @@ const Index = () => {
             }
           }
           // Recalculer les résultats avec les nouvelles volatilités implicites
-          recalculateResults();
+          setTimeout(() => {
+            recalculateResults();
+          }, 50);
         }
       }
     }
@@ -4869,7 +5073,6 @@ const Index = () => {
   const handleUseCustomPricesToggle = (checked: boolean) => {
     setUseCustomOptionPrices(checked);
     
-    // Initialiser les volatilités implicites si nécessaire
     if (checked) {
       // Initialiser les volatilités implicites à partir des prix actuels
       initializeImpliedVolatilities();
@@ -4878,10 +5081,17 @@ const Index = () => {
       if (!useImpliedVol) {
         setUseImpliedVol(true);
       }
-      
-      // Recalculer les résultats avec les nouvelles volatilités
-      recalculateResults();
     }
+    
+    // Toujours recalculer les résultats après le changement
+    setTimeout(() => {
+      if (checked) {
+        recalculateResults();
+      } else {
+        // Si on désactive les prix personnalisés, recalculer complètement
+        calculateResults();
+      }
+    }, 100);
   };
 
   // Gestionnaire pour activer/désactiver l'utilisation des volatilités implicites
@@ -4893,8 +5103,16 @@ const Index = () => {
       initializeImpliedVolatilities();
     }
     
-    // Recalculer les résultats avec les nouvelles volatilités implicites
-    calculateResults(); // Utiliser directement calculateResults au lieu de recalculateResults pour une mise à jour complète
+    // Toujours recalculer les résultats après le changement
+    setTimeout(() => {
+      if (useCustomOptionPrices) {
+        // Si on utilise des prix personnalisés, utiliser recalculateResults
+        recalculateResults();
+      } else {
+        // Sinon, recalculer complètement
+        calculateResults();
+      }
+    }, 100);
   };
 
   return (
@@ -5505,6 +5723,11 @@ const Index = () => {
                 <Button onClick={addForward} size="sm" variant="outline" className="h-8 px-3 text-sm flex items-center gap-1">
                   <Plus size={14} /> Add Forward
                 </Button>
+                {strategy.length > 0 && (
+                  <Button onClick={importToHedgingInstruments} size="sm" variant="secondary" className="h-8 px-3 text-sm flex items-center gap-1">
+                    <Upload size={14} /> Export to Hedging
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -6612,7 +6835,7 @@ const Index = () => {
                               value={(() => {
                                 const date = new Date(row.date);
                                 const monthKey = `${date.getFullYear()}-${date.getMonth() + 1}`;
-                                return manualForwards[monthKey] || row.forward.toFixed(2);
+                                return manualForwards[monthKey] ? Number(manualForwards[monthKey]).toFixed(4) : row.forward.toFixed(4);
                               })()}
                             onChange={(e) => {
                                 const date = new Date(row.date);
@@ -6635,8 +6858,8 @@ const Index = () => {
                                 const date = new Date(row.date);
                                 const monthKey = `${date.getFullYear()}-${date.getMonth() + 1}`;
                                 return realPriceParams.useSimulation ? 
-                              row.realPrice.toFixed(2) : 
-                                  (realPrices[monthKey] || row.forward);
+                              row.realPrice.toFixed(4) : 
+                                  (realPrices[monthKey] ? Number(realPrices[monthKey]).toFixed(4) : row.forward.toFixed(4));
                               })()}
                             onChange={(e) => {
                                 const date = new Date(row.date);
@@ -6721,7 +6944,7 @@ const Index = () => {
                                       {useCustomOptionPrices ? (
                                         <Input
                                           type="number"
-                                          value={customPrice.toFixed(2)}
+                                          value={customPrice.toFixed(4)}
                                           onChange={(e) => {
                                             const newValue = e.target.value === '' ? 0 : Number(e.target.value);
                                             // Mettre à jour les prix personnalisés et calculer la volatilité implicite
@@ -6729,16 +6952,16 @@ const Index = () => {
                                           }}
                                           onBlur={() => recalculateResults()}
                                           className="compact-input w-24 text-right"
-                                          step="0.01"
+                                          step="0.0001"
                                         />
                                       ) : (
-                                        <span className="font-mono">{opt.price.toFixed(2)}</span>
+                                        <span className="font-mono">{opt.price.toFixed(4)}</span>
                                       )}
                                     </td>
                                   );
                                 })}
-                              <td className="px-3 py-2 text-sm border-b border-border/30 bg-green-500/5 font-medium font-mono">{row.strategyPrice.toFixed(2)}</td>
-                              <td className="px-3 py-2 text-sm border-b border-border/30 bg-purple-500/5 font-medium font-mono">{row.totalPayoff.toFixed(2)}</td>
+                              <td className="px-3 py-2 text-sm border-b border-border/30 bg-green-500/5 font-medium font-mono">{row.strategyPrice.toFixed(4)}</td>
+                              <td className="px-3 py-2 text-sm border-b border-border/30 bg-purple-500/5 font-medium font-mono">{row.totalPayoff.toFixed(4)}</td>
                               <td className="px-3 py-2 text-sm border-b border-border/30">
                           <Input
                             type="number"

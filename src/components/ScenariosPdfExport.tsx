@@ -550,10 +550,10 @@ const ScenariosPdfExport = ({ scenarios, selectedScenarios, setSelectedScenarios
       
       const detailedResults = scenario.results.map(row => [
         row.date,
-        row.forward.toFixed(2),
-        row.realPrice.toFixed(2),
-        row.strategyPrice.toFixed(2),
-        row.totalPayoff.toFixed(2),
+                      row.forward.toFixed(4),
+              row.realPrice.toFixed(4),
+        row.strategyPrice.toFixed(4),
+        row.totalPayoff.toFixed(4),
         row.hedgedCost.toFixed(0),
         row.unhedgedCost.toFixed(0),
         row.deltaPnL.toFixed(0)
