@@ -1654,8 +1654,7 @@ const Index = () => {
       strikeType: 'percent',
       volatility: 20,
       quantity: 100,
-      barrier: 120,       // Default barrier at 120% of spot
-      secondBarrier: 80,  // Default second barrier at 80% of spot
+      // Ne pas ajouter de barrières par défaut - elles seront ajoutées seulement si nécessaires
       barrierType: 'percent'
     }]);
   };
@@ -2575,8 +2574,7 @@ const Index = () => {
       
       for (let i = 0; i < params.monthsToHedge; i++) {
       const date = new Date(startDate);
-      date.setMonth(date.getMonth() + i);
-      months.push(date);
+      date.getMonth() + i;
       
       const monthKey = `${date.getFullYear()}-${date.getMonth() + 1}`;
         const timeInYears = i / 12;
@@ -2749,30 +2747,135 @@ const Index = () => {
 
   const importToHedgingInstruments = () => {
     if (!strategy || strategy.length === 0) {
-      alert('Please add at least one strategy component first');
+      alert('Veuillez d\'abord ajouter au moins un composant de stratégie');
       return;
     }
 
     if (!params.currencyPair) {
-      alert('Please select a currency pair first');
+      alert('Veuillez d\'abord sélectionner une paire de devises');
       return;
     }
 
-    const strategyName = prompt('Enter a name for this strategy:');
+    if (!results || results.length === 0) {
+      alert('Aucun résultat détaillé disponible. Veuillez d\'abord exécuter le calcul.');
+      return;
+    }
+
+    const strategyName = prompt('Entrez un nom pour cette stratégie:');
     if (!strategyName) return;
 
     try {
       const importService = StrategyImportService.getInstance();
       
-      // Prepare detailed results data for import
-      let detailedResultsData = null;
-      if (results && results.length > 0) {
-        // Enhance results with implied volatility data
-        detailedResultsData = results.map(result => ({
+      // Préparer TOUTES les données de résultats détaillés pour l'import
+      // avec informations enrichies pour le re-pricing
+      const enrichedDetailedResults = results.map((result, periodIndex) => {
+        const monthKey = `${new Date(result.date).getFullYear()}-${new Date(result.date).getMonth() + 1}`;
+        
+        // Enrichir chaque résultat avec des informations supplémentaires
+        const enrichedResult = {
           ...result,
-          impliedVolatilities: impliedVolatilities[result.date] || {}
-        }));
-      }
+          // Informations de marché du moment
+          marketData: {
+            spotPrice: params.spotPrice,
+            domesticRate: params.domesticRate,
+            foreignRate: params.foreignRate,
+            monthKey: monthKey,
+            periodIndex: periodIndex
+          },
+          // Volatilités implicites spécifiques
+          impliedVolatilities: impliedVolatilities[result.date] || {},
+          // Prix personnalisés si utilisés
+          customPrices: useCustomOptionPrices ? (customOptionPrices[monthKey] || {}) : {},
+          // Forwards manuels si utilisés
+          manualForward: manualForwards[monthKey],
+          // Prix réels si utilisés
+          realPrice: realPrices[monthKey],
+          // Informations détaillées sur chaque composant de stratégie
+          strategyDetails: strategy.map((component, componentIndex) => {
+            // Calculer le strike en valeur absolue
+            const absoluteStrike = component.strikeType === 'percent' 
+              ? params.spotPrice * (component.strike / 100)
+              : component.strike;
+            
+            // Calculer les barrières en valeur absolue SEULEMENT pour les options barrières
+            let absoluteBarrier = undefined;
+            let absoluteSecondBarrier = undefined;
+            
+            if (component.type.includes('knockout') || component.type.includes('knockin') || 
+                component.type.includes('touch') || component.type.includes('binary')) {
+              absoluteBarrier = component.barrier 
+                ? (component.barrierType === 'percent' 
+                    ? params.spotPrice * (component.barrier / 100)
+                    : component.barrier)
+                : undefined;
+              
+              absoluteSecondBarrier = component.secondBarrier 
+                ? (component.barrierType === 'percent' 
+                    ? params.spotPrice * (component.secondBarrier / 100)
+                    : component.secondBarrier)
+                : undefined;
+            }
+
+            // Obtenir la volatilité effective utilisée pour ce composant
+            const optionKey = `${component.type}-${componentIndex}`;
+            const effectiveVolatility = useImpliedVol && impliedVolatilities[result.date]?.[optionKey] !== undefined
+              ? impliedVolatilities[result.date][optionKey]
+              : component.volatility;
+
+            // Obtenir le prix d'option correspondant depuis les résultats
+            const optionPriceData = result.optionPrices[componentIndex];
+            
+            return {
+              componentIndex: componentIndex,
+              type: component.type,
+              originalStrike: component.strike,
+              strikeType: component.strikeType,
+              absoluteStrike: absoluteStrike,
+              originalVolatility: component.volatility,
+              effectiveVolatility: effectiveVolatility,
+              quantity: component.quantity,
+              // Barrières en valeur absolue (seulement pour les options barrières)
+              originalBarrier: (component.type.includes('knockout') || component.type.includes('knockin') || 
+                               component.type.includes('touch') || component.type.includes('binary')) 
+                               ? component.barrier : undefined,
+              absoluteBarrier: absoluteBarrier,
+              originalSecondBarrier: (component.type.includes('knockout') || component.type.includes('knockin') || 
+                                     component.type.includes('touch') || component.type.includes('binary')) 
+                                     ? component.secondBarrier : undefined,
+              absoluteSecondBarrier: absoluteSecondBarrier,
+              barrierType: (component.type.includes('knockout') || component.type.includes('knockin') || 
+                           component.type.includes('touch') || component.type.includes('binary')) 
+                           ? component.barrierType : undefined,
+              // Rebate pour les options digitales
+              rebate: component.rebate,
+              // Time to payoff pour les one-touch
+              timeToPayoff: component.timeToPayoff,
+              // Informations sur le strike dynamique si applicable
+              dynamicStrike: component.dynamicStrike,
+              dynamicStrikeInfo: optionPriceData?.dynamicStrikeInfo,
+              // Prix et données calculées
+              calculatedPrice: optionPriceData?.price,
+              label: optionPriceData?.label,
+              // Prix personnalisé si utilisé
+              customPrice: useCustomOptionPrices ? customOptionPrices[monthKey]?.[optionKey] : undefined,
+              // Données de re-pricing essentielles
+              repricingData: {
+                underlyingPrice: result.forward,
+                timeToMaturity: result.timeToMaturity,
+                domesticRate: params.domesticRate / 100,
+                foreignRate: params.foreignRate / 100,
+                volatility: effectiveVolatility / 100,
+                dividendYield: 0, // Pas applicable pour FX
+                // Modèle de pricing utilisé
+                pricingModel: 'garman-kohlhagen' // ou le modèle utilisé
+              }
+            };
+          })
+        };
+        
+        return enrichedResult;
+      });
       
       const strategyId = importService.importStrategy(strategyName, strategy, {
         currencyPair: params.currencyPair,
@@ -2785,15 +2888,22 @@ const Index = () => {
         foreignRate: params.foreignRate,
         useCustomPeriods: params.useCustomPeriods,
         customPeriods: params.customPeriods,
-      }, detailedResultsData);
+      }, enrichedDetailedResults); // Passer TOUS les résultats enrichis
 
       // Dispatch custom event to notify HedgingInstruments page
       window.dispatchEvent(new CustomEvent('hedgingInstrumentsUpdated'));
 
-      alert(`Strategy "${strategyName}" exported successfully to Hedging Instruments!\nStrategy ID: ${strategyId}`);
+      // Message d'alerte amélioré avec plus d'informations
+      const totalPeriods = enrichedDetailedResults.length;
+      const totalComponents = strategy.length;
+      alert(`Stratégie "${strategyName}" exportée avec succès vers Instruments de Couverture!\n` +
+            `ID de la stratégie: ${strategyId}\n` +
+            `Périodes exportées: ${totalPeriods}\n` +
+            `Composants par période: ${totalComponents}\n` +
+            `Total d'instruments créés: ${totalPeriods * totalComponents}`);
     } catch (error) {
-      console.error('Error exporting strategy:', error);
-      alert('Error exporting strategy. Please try again.');
+      console.error('Erreur lors de l\'export de la stratégie:', error);
+      alert('Erreur lors de l\'export de la stratégie. Veuillez réessayer.');
     }
   };
 
@@ -2839,6 +2949,32 @@ const Index = () => {
         ...prev,
         [key]: { ...DEFAULT_SCENARIOS[key] }
       }));
+    }
+  };
+
+  // Fonction pour nettoyer les barrières incorrectes des stratégies existantes
+  const cleanStrategyBarriers = () => {
+    const cleanedStrategy = strategy.map(component => {
+      // Si ce n'est pas une option barrière, supprimer les barrières
+      if (!component.type.includes('knockout') && !component.type.includes('knockin') && 
+          !component.type.includes('touch') && !component.type.includes('binary')) {
+        const { barrier, secondBarrier, barrierType, ...cleanComponent } = component;
+        return cleanComponent;
+      }
+      return component;
+    });
+    
+    setStrategy(cleanedStrategy);
+    console.log('Barrières nettoyées pour les options non-barrières');
+  };
+
+  // Fonction pour nettoyer le localStorage
+  const clearLocalStorage = () => {
+    if (confirm('Êtes-vous sûr de vouloir effacer toutes les données sauvegardées ?')) {
+      localStorage.removeItem('calculatorState');
+      localStorage.removeItem('importedStrategies');
+      localStorage.removeItem('hedgingInstruments');
+      window.location.reload();
     }
   };
 
@@ -7304,7 +7440,7 @@ const Index = () => {
                         {(() => {
                           const totalPnL = results.reduce((sum, row) => sum + row.deltaPnL, 0);
                           const totalUnhedgedCost = results.reduce((sum, row) => sum + row.unhedgedCost, 0);
-                              return (((totalPnL / Math.abs(totalUnhedgedCost)) * 100).toFixed(2) + '%');
+                                                             return (((totalPnL / Math.abs(totalUnhedgedCost)) * 100).toFixed(2) + '%');
                         })()}
                       </td>
                     </tr>

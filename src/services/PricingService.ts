@@ -230,6 +230,9 @@ export class PricingService {
   ): number {
     const rebateDecimal = rebate / 100;
     
+    // Normaliser le type d'option pour le matching
+    const normalizedType = optionType.toLowerCase().replace(/[-\s]/g, '');
+    
     let payoutSum = 0;
     const stepsPerDay = 4;
     const totalSteps = Math.max(252 * t * stepsPerDay, 50);
@@ -240,50 +243,50 @@ export class PricingService {
       let touched = false;
       let touchedSecond = false;
       
-      for (let step = 0; step < totalSteps; step++) {
-        const z = Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
-        price = price * Math.exp((r - 0.5 * sigma * sigma) * dt + sigma * Math.sqrt(dt) * z);
-        
-        switch (optionType) {
-          case 'one-touch':
+              for (let step = 0; step < totalSteps; step++) {
+          const z = Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
+          price = price * Math.exp((r - 0.5 * sigma * sigma) * dt + sigma * Math.sqrt(dt) * z);
+          
+          switch (normalizedType) {
+          case 'onetouch':
             if (barrier !== undefined && price >= barrier) touched = true;
             break;
-          case 'no-touch':
+          case 'notouch':
             if (barrier !== undefined && price >= barrier) touched = true;
             break;
-          case 'double-touch':
+          case 'doubletouch':
             if (barrier !== undefined && price >= barrier) touched = true;
             if (secondBarrier !== undefined && price <= secondBarrier) touchedSecond = true;
             break;
-          case 'double-no-touch':
+          case 'doublenotouch':
             if ((barrier !== undefined && price >= barrier) || (secondBarrier !== undefined && price <= secondBarrier)) touched = true;
             break;
-          case 'range-binary':
+          case 'rangebinary':
             if (barrier !== undefined && K !== undefined && price >= K && price <= barrier) touched = true;
             break;
-          case 'outside-binary':
+          case 'outsidebinary':
             if (barrier !== undefined && K !== undefined && (price <= K || price >= barrier)) touched = true;
             break;
         }
       }
       
-      switch (optionType) {
-        case 'one-touch':
+      switch (normalizedType) {
+        case 'onetouch':
           if (touched) payoutSum += rebateDecimal;
           break;
-        case 'no-touch':
+        case 'notouch':
           if (!touched) payoutSum += rebateDecimal;
           break;
-        case 'double-touch':
+        case 'doubletouch':
           if (touched || touchedSecond) payoutSum += rebateDecimal;
           break;
-        case 'double-no-touch':
+        case 'doublenotouch':
           if (!touched) payoutSum += rebateDecimal;
           break;
-        case 'range-binary':
+        case 'rangebinary':
           if (touched) payoutSum += rebateDecimal;
           break;
-        case 'outside-binary':
+        case 'outsidebinary':
           if (touched) payoutSum += rebateDecimal;
           break;
       }
@@ -297,13 +300,15 @@ export class PricingService {
     optionType: string,
     S: number,
     K: number,
-    r: number,
+    r_d: number,
     t: number,
     sigma: number,
     barrier: number,
-    secondBarrier?: number
+    secondBarrier?: number,
+    r_f: number = 0
   ): number {
-    const b = r;  // Cost of carry
+    const r = r_d;  // Risk-free rate (domestic)
+    const b = r_d - r_f;  // Cost of carry for FX options
     const v = sigma;
     const T = t;
     
@@ -360,11 +365,41 @@ export class PricingService {
         TypeFlag = "puo"; // Put up-and-out
         eta = -1;
         phi = -1;
+      } else if (optionType === 'put-reverse-knockout') {
+        // Put-reverse-knockout : logique spéciale
+        if (H > S) {
+          // Barrière au-dessus du spot : équivalent à call-up-and-out
+          TypeFlag = "cuo";
+          eta = -1;
+          phi = 1;
+        } else {
+          // Barrière en-dessous du spot : équivalent à call-down-and-out
+          TypeFlag = "cdo";
+          eta = 1;
+          phi = 1;
+        }
+      } else if (optionType === 'call-reverse-knockout') {
+        // Call-reverse-knockout : logique spéciale
+        if (H > S) {
+          // Barrière au-dessus du spot : équivalent à put-up-and-out
+          TypeFlag = "puo";
+          eta = -1;
+          phi = -1;
+        } else {
+          // Barrière en-dessous du spot : équivalent à put-down-and-out
+          TypeFlag = "pdo";
+          eta = 1;
+          phi = -1;
+        }
       }
       
       if (TypeFlag === "") {
+        console.warn(`[PRICING] Unknown barrier option type: ${optionType}, H=${H}, S=${S}, K=${K}`);
         return 0; // Type non reconnu
       }
+      
+      console.log(`[PRICING] ${optionType}: TypeFlag=${TypeFlag}, eta=${eta}, phi=${phi}, H=${H}, S=${S}, K=${K}`);
+      console.log(`[PRICING] Cost of carry b=${b}, r=${r}, sigma=${v}, T=${T}`);
       
       // Calculer les termes f1-f6
       const f1 = phi * S * Math.exp((b-r)*T) * CND(phi*X1) - 
@@ -414,6 +449,7 @@ export class PricingService {
         }
       }
       
+      console.log(`[PRICING] Final option price before max(0, x): ${optionPrice}`);
       return Math.max(0, optionPrice);
     }
     
@@ -442,7 +478,7 @@ export class PricingService {
       // Use closed-form for single barrier options
       if (!type.includes('double') && !secondBarrier) {
         const closedFormPrice = this.calculateBarrierOptionClosedForm(
-          type, S, K, r_d, t, sigma, barrier
+          type, S, K, r_d, t, sigma, barrier, secondBarrier, r_f
         );
         if (closedFormPrice > 0) {
           return closedFormPrice;

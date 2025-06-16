@@ -50,6 +50,11 @@ const HedgingInstruments = () => {
   const [currencyMarketData, setCurrencyMarketData] = useState<{ [currency: string]: CurrencyMarketData }>({});
   const [isRecalculating, setIsRecalculating] = useState(false);
 
+  // Dialog states for view and edit actions
+  const [selectedInstrument, setSelectedInstrument] = useState<HedgingInstrument | null>(null);
+  const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+
   // Pricing model states - récupérer depuis le localStorage pour utiliser les mêmes paramètres que Strategy Builder
   const [optionPricingModel, setOptionPricingModel] = useState<'black-scholes' | 'garman-kohlhagen' | 'monte-carlo'>(() => {
     const savedState = localStorage.getItem('calculatorState');
@@ -303,39 +308,137 @@ const HedgingInstruments = () => {
     return PricingService.calculateGarmanKohlhagenPrice(type, S, K, r, 0, t, effectiveSigma);
   };
 
-  // Fonction calculateTodayPrice adaptée pour utiliser les données par devise
+  // Fonction calculateTodayPrice améliorée pour utiliser les données enrichies d'export
   const calculateTodayPrice = (instrument: HedgingInstrument): number => {
-    const marketData = currencyMarketData[instrument.currency];
-    if (!marketData) {
-      console.warn(`No market data found for currency: ${instrument.currency}`);
-      return 0;
-    }
-
-    const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
-    
-    if (timeToMaturity <= 0) {
-      // Option has expired
-      return 0;
-    }
-
+    // Paramètres de marché dynamiques (spot, taux, vol) et timeToMaturity recalculé à chaque rendu
+    const marketData = currencyMarketData[instrument.currency] || getDefaultMarketDataForCurrency(instrument.currency);
     const S = marketData.spot;
-    const sigma = marketData.volatility / 100;
     const r_d = marketData.domesticRate / 100;
     const r_f = marketData.foreignRate / 100;
-
-    // Calculate forward price (same as Strategy Builder)
-    const forward = S * Math.exp((r_d - r_f) * timeToMaturity);
-
-    // Use the strike from the instrument
-    const K = instrument.strike || S;
-
-    // Map instrument type to option type for pricing
-    let optionType = instrument.type.toLowerCase();
+    const sigma = instrument.impliedVolatility ? (instrument.impliedVolatility / 100) : (marketData.volatility / 100);
+    const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
     
-    // Handle different instrument type formats and calculate price using Strategy Builder logic
+    // Vérifier l'expiration
+    if (timeToMaturity <= 0) {
+      return 0;
+    }
+
+    // Utiliser le strike en valeur absolue de l'instrument
+    const K = instrument.strike || S;
+    
+    // Map instrument type to option type pour pricing
+    const optionType = instrument.type.toLowerCase();
+    // DEBUG: Log des paramètres pour diagnostiquer
+    console.log(`[DEBUG] Instrument ${instrument.id}: params S=${S}, r_d=${r_d}, r_f=${r_f}, t=${timeToMaturity}, sigma=${sigma}`);
+    
+    // STRATÉGIE DE PRICING SELON LE TYPE D'INSTRUMENT
+    // IMPORTANT: Ordre des conditions critique - les plus spécifiques d'abord !
+    
+    // 1. OPTIONS BARRIÈRES - PRIORITÉ ABSOLUE (avant les vanilles)
+    if (optionType.includes('knock-out') || optionType.includes('knock-in') || 
+        optionType.includes('barrier') || optionType.includes('ko ') || optionType.includes('ki ') ||
+        optionType.includes('knockout') || optionType.includes('knockin') || optionType.includes('reverse')) {
+      
+      console.log(`[DEBUG] ${instrument.id}: Detected as BARRIER option, using closed-form`);
+      
+      // Utiliser les barrières en valeur absolue de l'instrument
+      const barrier = instrument.barrier;
+      const secondBarrier = instrument.secondBarrier;
+      
+      if (!barrier) {
+        console.warn(`Barrier missing for ${instrument.type} instrument ${instrument.id}`);
+        return 0;
+      }
+      
+      // MAPPING CORRECT DES TYPES POUR LE PRICING SERVICE
+      let pricingType = "";
+      if (optionType.includes('knock-out') || optionType.includes('knockout') || optionType.includes('reverse')) {
     if (optionType.includes('call')) {
-      optionType = 'call';
-      // Use Garman-Kohlhagen pricing (same as Strategy Builder)
+          if (optionType.includes('reverse')) {
+            pricingType = "call-reverse-knockout";
+            console.log(`[DEBUG] ${instrument.id}: Call-reverse-knockout mapped to call-reverse-knockout`);
+          } else {
+            pricingType = "call-knockout";
+          }
+        } else if (optionType.includes('put')) {
+          if (optionType.includes('reverse')) {
+            pricingType = "put-reverse-knockout";
+            console.log(`[DEBUG] ${instrument.id}: Put-reverse-knockout mapped to put-reverse-knockout (barrier=${barrier}, spot=${S})`);
+          } else {
+            pricingType = "put-knockout";
+          }
+        }
+      } else if (optionType.includes('knock-in') || optionType.includes('knockin')) {
+        if (optionType.includes('call')) {
+          pricingType = "call-knockin";
+        } else if (optionType.includes('put')) {
+          pricingType = "put-knockin";
+        }
+      }
+      
+      console.log(`[DEBUG] ${instrument.id}: Mapped type to: "${pricingType}"`);
+      console.log(`[DEBUG] ${instrument.id}: Barrier params - barrier=${barrier}, strike=${K}, spot=${S}`);
+      console.log(`[DEBUG] ${instrument.id}: Barrier relationship - barrier < spot: ${barrier < S}, barrier > spot: ${barrier > S}`);
+      
+      if (pricingType) {
+        // Pour les reverse-knockout, on peut avoir besoin d'ajuster les paramètres
+        let adjustedBarrier = barrier;
+        let adjustedStrike = K;
+        
+        if (optionType.includes('reverse')) {
+          console.log(`[DEBUG] ${instrument.id}: Reverse option detected, using original parameters`);
+          // Pour les reverse, on garde les paramètres originaux mais on change le type de pricing
+        }
+        
+        const price = PricingService.calculateBarrierOptionClosedForm(
+          pricingType,
+          S,
+          adjustedStrike,
+          r_d,
+          timeToMaturity,
+          sigma,
+          adjustedBarrier,
+          secondBarrier,
+          r_f  // Ajouter le taux étranger pour le cost of carry FX
+        );
+        console.log(`[DEBUG] ${instrument.id}: Calculated price: ${price}`);
+        return price;
+      }
+      
+      // Fallback si le mapping échoue
+      return 0;
+    }
+    
+    // 2. OPTIONS DIGITALES - DEUXIÈME PRIORITÉ
+    else if (optionType.includes('touch') || optionType.includes('binary') || 
+             optionType.includes('digital')) {
+      
+      console.log(`[DEBUG] ${instrument.id}: Detected as DIGITAL option, using Monte Carlo`);
+      
+      const barrier = instrument.barrier || K;
+      const secondBarrier = instrument.secondBarrier;
+      const rebate = instrument.rebate || 5; // Utiliser le rebate de l'instrument ou 5% par défaut
+      
+      console.log(`[DEBUG] ${instrument.id}: Digital option params - barrier=${barrier}, secondBarrier=${secondBarrier}, rebate=${rebate}%`);
+      
+      return PricingService.calculateDigitalOptionPrice(
+        instrument.type.toLowerCase(),
+        S,
+        K,
+        r_d,
+        timeToMaturity,
+        sigma,
+        barrier,
+        secondBarrier,
+        10000, // Nombre de simulations pour les digitales
+        rebate
+      );
+    }
+    
+    // 3. OPTIONS VANILLES EXPLICITES - Utiliser Garman-Kohlhagen
+    else if (optionType === 'vanilla call') {
+      console.log(`[DEBUG] ${instrument.id}: Detected as VANILLA CALL, using Garman-Kohlhagen`);
+      
       return PricingService.calculateGarmanKohlhagenPrice(
         'call',
         S,
@@ -345,9 +448,9 @@ const HedgingInstruments = () => {
         timeToMaturity,
         sigma
       );
-    } else if (optionType.includes('put')) {
-      optionType = 'put';
-      // Use Garman-Kohlhagen pricing (same as Strategy Builder)
+    } else if (optionType === 'vanilla put') {
+      console.log(`[DEBUG] ${instrument.id}: Detected as VANILLA PUT, using Garman-Kohlhagen`);
+      
       return PricingService.calculateGarmanKohlhagenPrice(
         'put',
         S,
@@ -357,49 +460,53 @@ const HedgingInstruments = () => {
         timeToMaturity,
         sigma
       );
-    } else if (optionType === 'forward') {
-      // For forwards, calculate the value as difference between forward and strike, discounted
+    }
+    
+    // 4. FORWARDS
+    else if (optionType === 'forward') {
+      console.log(`[DEBUG] ${instrument.id}: Detected as FORWARD`);
+      
+      const forward = S * Math.exp((r_d - r_f) * timeToMaturity);
       return (forward - K) * Math.exp(-r_d * timeToMaturity);
-    } else if (optionType === 'swap') {
-      // For swaps, use forward price as approximation
+    }
+    
+    // 5. SWAPS
+    else if (optionType === 'swap') {
+      console.log(`[DEBUG] ${instrument.id}: Detected as SWAP`);
+      
+      const forward = S * Math.exp((r_d - r_f) * timeToMaturity);
       return forward;
-    } else if (optionType.includes('knockout') || optionType.includes('knockin')) {
-      // For barrier options, use the same logic as Strategy Builder
-      const barrier = instrument.barrier || K * 1.1; // Default barrier if not specified
-      const secondBarrier = instrument.secondBarrier;
+    }
+    
+    // 6. OPTIONS VANILLES GÉNÉRIQUES - SEULEMENT si pas déjà traité
+    else if (optionType.includes('call') && !optionType.includes('knock')) {
+      console.log(`[DEBUG] ${instrument.id}: Fallback to VANILLA CALL (Garman-Kohlhagen)`);
       
-      // Use closed-form barrier option pricing (same as Strategy Builder)
-      return PricingService.calculateBarrierOptionClosedForm(
-        instrument.type,
+      return PricingService.calculateGarmanKohlhagenPrice(
+        'call',
         S,
         K,
         r_d,
+        r_f,
         timeToMaturity,
-        sigma,
-        barrier,
-        secondBarrier
+        sigma
       );
-    } else if (optionType.includes('touch') || optionType.includes('binary')) {
-      // For digital options, use the same logic as Strategy Builder
-      const barrier = instrument.barrier || K;
-      const secondBarrier = instrument.secondBarrier;
-      const rebate = instrument.rebate || 1;
+    } else if (optionType.includes('put') && !optionType.includes('knock')) {
+      console.log(`[DEBUG] ${instrument.id}: Fallback to VANILLA PUT (Garman-Kohlhagen)`);
       
-      return PricingService.calculateDigitalOptionPrice(
-        instrument.type,
+      return PricingService.calculateGarmanKohlhagenPrice(
+        'put',
         S,
         K,
         r_d,
+        r_f,
         timeToMaturity,
-        sigma,
-        barrier,
-        secondBarrier,
-        10000, // Number of simulations
-        rebate
+        sigma
       );
     }
 
-    // Fallback to Garman-Kohlhagen for unknown types
+    // Fallback pour types inconnus
+    console.warn(`Unknown instrument type: ${instrument.type} for instrument ${instrument.id}`);
     return PricingService.calculateGarmanKohlhagenPrice(
       'call', // Default to call
       S,
@@ -517,10 +624,47 @@ const HedgingInstruments = () => {
     });
   };
 
+  // View instrument function
+  const viewInstrument = (instrument: HedgingInstrument) => {
+    setSelectedInstrument(instrument);
+    setIsViewDialogOpen(true);
+  };
+
+  // Edit instrument function
+  const editInstrument = (instrument: HedgingInstrument) => {
+    setSelectedInstrument(instrument);
+    setIsEditDialogOpen(true);
+  };
+
+  // Save instrument changes function
+  const saveInstrumentChanges = (updatedInstrument: HedgingInstrument) => {
+    importService.updateInstrument(updatedInstrument.id, updatedInstrument);
+    const updatedInstruments = importService.getHedgingInstruments();
+    setInstruments(updatedInstruments);
+    setIsEditDialogOpen(false);
+    setSelectedInstrument(null);
+    
+    // Dispatch custom event to notify other components
+    window.dispatchEvent(new CustomEvent('hedgingInstrumentsUpdated'));
+    
+    toast({
+      title: "Instrument Updated",
+      description: "The hedging instrument has been updated successfully.",
+    });
+  };
+
   const filteredInstruments = instruments.filter(instrument => {
+    const isOption = instrument.type.includes("Call") || 
+                    instrument.type.includes("Put") || 
+                    instrument.type === "Collar" ||
+                    instrument.type.includes("Touch") ||
+                    instrument.type.includes("Binary") ||
+                    instrument.type.includes("Digital") ||
+                    instrument.type.includes("Knock");
+    
     const matchesTab = selectedTab === "all" || 
                       (selectedTab === "forwards" && instrument.type === "Forward") ||
-                      (selectedTab === "options" && (instrument.type.includes("Call") || instrument.type.includes("Put") || instrument.type === "Collar")) ||
+                      (selectedTab === "options" && isOption) ||
                       (selectedTab === "swaps" && instrument.type === "Swap") ||
                       (selectedTab === "hedge-accounting" && instrument.hedge_accounting);
     
@@ -936,15 +1080,18 @@ const HedgingInstruments = () => {
                       <TableHead>ID</TableHead>
                       <TableHead>Type</TableHead>
                       <TableHead>Currency Pair</TableHead>
-                      <TableHead>Quantity to Hedge (%)</TableHead>
+                      <TableHead>Quantity (%)</TableHead>
                       <TableHead>Unit Price (Initial)</TableHead>
                       <TableHead>Today Price</TableHead>
                       <TableHead>MTM</TableHead>
                       <TableHead>Time to Maturity</TableHead>
                       <TableHead>Volatility (%)</TableHead>
-                      <TableHead>Volume to Hedge</TableHead>
+                      <TableHead>Strike</TableHead>
+                      <TableHead>Barrier 1</TableHead>
+                      <TableHead>Barrier 2</TableHead>
+                      <TableHead>Rebate (%)</TableHead>
+                      <TableHead>Volume</TableHead>
                       <TableHead>Notional</TableHead>
-                      <TableHead>Rate/Strike</TableHead>
                       <TableHead>Maturity</TableHead>
                       <TableHead>Effectiveness</TableHead>
                       <TableHead>Status</TableHead>
@@ -991,6 +1138,11 @@ const HedgingInstruments = () => {
                                     From: {instrument.strategyName}
                                   </div>
                                 )}
+                                {instrument.repricingData && (
+                                  <div className="text-xs text-blue-600">
+                                    Period Data ✓
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </TableCell>
@@ -1006,9 +1158,50 @@ const HedgingInstruments = () => {
                             {unitPrice > 0 ? unitPrice.toFixed(4) : 'N/A'}
                           </TableCell>
                           <TableCell className="font-mono text-right">
-                            <span className={todayPrice > 0 ? "text-blue-600" : "text-gray-500"}>
-                              {todayPrice > 0 ? todayPrice.toFixed(4) : 'N/A'}
+                            <span className={todayPrice !== 0 ? "text-blue-600" : "text-gray-500"}>
+                              {todayPrice !== 0 ? todayPrice.toFixed(4) : 'N/A'}
                             </span>
+                            {(() => {
+                              // Détecter le modèle de pricing utilisé (EXACTEMENT la même logique que calculateTodayPrice)
+                              const optionType = instrument.type.toLowerCase();
+                              let modelName = "unknown";
+                              
+                              // 1. OPTIONS BARRIÈRES - PRIORITÉ ABSOLUE (avant les vanilles)
+                              if (optionType.includes('knock-out') || optionType.includes('knock-in') || 
+                                  optionType.includes('barrier') || optionType.includes('ko ') || optionType.includes('ki ') ||
+                                  optionType.includes('knockout') || optionType.includes('knockin') || optionType.includes('reverse')) {
+                                modelName = "closed-form";
+                              }
+                              // 2. OPTIONS DIGITALES - DEUXIÈME PRIORITÉ
+                              else if (optionType.includes('touch') || optionType.includes('binary') || 
+                                       optionType.includes('digital')) {
+                                modelName = "monte-carlo";
+                              }
+                              // 3. OPTIONS VANILLES EXPLICITES
+                              else if (optionType === 'vanilla call' || optionType === 'vanilla put') {
+                                modelName = "garman-kohlhagen";
+                              }
+                              // 4. FORWARDS
+                              else if (optionType === 'forward') {
+                                modelName = "forward-pricing";
+                              }
+                              // 5. SWAPS
+                              else if (optionType === 'swap') {
+                                modelName = "swap-pricing";
+                              }
+                              // 6. OPTIONS VANILLES GÉNÉRIQUES - SEULEMENT si pas déjà traité
+                              else if (optionType.includes('call') && !optionType.includes('knock')) {
+                                modelName = "garman-kohlhagen";
+                              } else if (optionType.includes('put') && !optionType.includes('knock')) {
+                                modelName = "garman-kohlhagen";
+                              }
+                              
+                              return (
+                                <div className="text-xs text-green-600">
+                                  Model: {modelName}
+                                </div>
+                              );
+                            })()}
                           </TableCell>
                           <TableCell className="font-mono text-right">
                             <span className={`font-medium ${getMTMColor(mtmValue)}`}>
@@ -1022,15 +1215,34 @@ const HedgingInstruments = () => {
                           </TableCell>
                           <TableCell className="font-mono text-center">
                             {volatility > 0 ? volatility.toFixed(1) + '%' : 'N/A'}
+                            {instrument.impliedVolatility && (
+                              <div className="text-xs text-purple-600">
+                                IV: {instrument.impliedVolatility.toFixed(1)}%
+                              </div>
+                            )}
+                          </TableCell>
+                          <TableCell className="font-mono text-right">
+                            {instrument.strike ? instrument.strike.toFixed(4) : 'N/A'}
+                            {instrument.dynamicStrikeInfo && (
+                              <div className="text-xs text-orange-600">
+                                Dyn: {instrument.dynamicStrikeInfo.calculatedStrikePercent}
+                              </div>
+                            )}
+                          </TableCell>
+                          <TableCell className="font-mono text-right">
+                            {instrument.barrier ? instrument.barrier.toFixed(4) : 'N/A'}
+                          </TableCell>
+                          <TableCell className="font-mono text-right">
+                            {instrument.secondBarrier ? instrument.secondBarrier.toFixed(4) : 'N/A'}
+                          </TableCell>
+                          <TableCell className="font-mono text-right">
+                            {instrument.rebate ? instrument.rebate.toFixed(2) : 'N/A'}
                           </TableCell>
                           <TableCell className="font-mono text-right">
                             {formatCurrency(volumeToHedge)}
                           </TableCell>
                           <TableCell className="font-mono text-right">
                             {calculatedNotional > 0 ? formatCurrency(calculatedNotional) : formatCurrency(instrument.notional)}
-                          </TableCell>
-                          <TableCell className="font-mono">
-                            {instrument.strike ? instrument.strike.toFixed(4) : 'N/A'}
                           </TableCell>
                           <TableCell>{instrument.maturity}</TableCell>
                         <TableCell>
@@ -1051,10 +1263,20 @@ const HedgingInstruments = () => {
                         <TableCell>{getStatusBadge(instrument.status)}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            <Button variant="ghost" size="sm" title="View Details">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              title="View Details"
+                              onClick={() => viewInstrument(instrument)}
+                            >
                               <Eye className="h-4 w-4" />
                             </Button>
-                            <Button variant="ghost" size="sm" title="Edit">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              title="Edit"
+                              onClick={() => editInstrument(instrument)}
+                            >
                               <Edit className="h-4 w-4" />
                             </Button>
                             <Button 
@@ -1116,7 +1338,226 @@ const HedgingInstruments = () => {
           </div>
         </CardContent>
       </Card>
+
+      {/* View Instrument Dialog */}
+      <Dialog open={isViewDialogOpen} onOpenChange={setIsViewDialogOpen}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle>Instrument Details</DialogTitle>
+            <DialogDescription>
+              View detailed information about this hedging instrument
+            </DialogDescription>
+          </DialogHeader>
+          {selectedInstrument && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label className="text-sm font-medium">ID</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.id}</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Type</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.type}</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Currency Pair</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.currency}</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Quantity</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.quantity?.toFixed(1)}%</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Strike</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.strike?.toFixed(4) || 'N/A'}</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Maturity</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.maturity}</p>
+                </div>
+                {selectedInstrument.barrier && (
+                  <div>
+                    <Label className="text-sm font-medium">Barrier 1</Label>
+                    <p className="text-sm text-muted-foreground">{selectedInstrument.barrier.toFixed(4)}</p>
+                  </div>
+                )}
+                {selectedInstrument.secondBarrier && (
+                  <div>
+                    <Label className="text-sm font-medium">Barrier 2</Label>
+                    <p className="text-sm text-muted-foreground">{selectedInstrument.secondBarrier.toFixed(4)}</p>
+                  </div>
+                )}
+                {selectedInstrument.rebate && (
+                  <div>
+                    <Label className="text-sm font-medium">Rebate (%)</Label>
+                    <p className="text-sm text-muted-foreground">{selectedInstrument.rebate.toFixed(2)}%</p>
+                  </div>
+                )}
+                <div>
+                  <Label className="text-sm font-medium">Notional</Label>
+                  <p className="text-sm text-muted-foreground">{formatCurrency(selectedInstrument.notional)}</p>
+                </div>
+                <div>
+                  <Label className="text-sm font-medium">Status</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.status}</p>
+                </div>
+              </div>
+              {selectedInstrument.strategyName && (
+                <div>
+                  <Label className="text-sm font-medium">Strategy Source</Label>
+                  <p className="text-sm text-muted-foreground">{selectedInstrument.strategyName}</p>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsViewDialogOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Instrument Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle>Edit Instrument</DialogTitle>
+            <DialogDescription>
+              Modify the parameters of this hedging instrument
+            </DialogDescription>
+          </DialogHeader>
+          {selectedInstrument && (
+            <InstrumentEditForm 
+              instrument={selectedInstrument}
+              onSave={saveInstrumentChanges}
+              onCancel={() => setIsEditDialogOpen(false)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </Layout>
+  );
+};
+
+// Component for editing instrument details
+const InstrumentEditForm: React.FC<{
+  instrument: HedgingInstrument;
+  onSave: (instrument: HedgingInstrument) => void;
+  onCancel: () => void;
+}> = ({ instrument, onSave, onCancel }) => {
+  const [editedInstrument, setEditedInstrument] = useState<HedgingInstrument>({ ...instrument });
+
+  const handleSave = () => {
+    onSave(editedInstrument);
+  };
+
+  const updateField = (field: keyof HedgingInstrument, value: any) => {
+    setEditedInstrument(prev => ({ ...prev, [field]: value }));
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label htmlFor="edit-quantity">Quantity (%)</Label>
+          <Input
+            id="edit-quantity"
+            type="number"
+            step="0.1"
+            value={editedInstrument.quantity || 0}
+            onChange={(e) => updateField('quantity', parseFloat(e.target.value) || 0)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="edit-strike">Strike</Label>
+          <Input
+            id="edit-strike"
+            type="number"
+            step="0.0001"
+            value={editedInstrument.strike || 0}
+            onChange={(e) => updateField('strike', parseFloat(e.target.value) || 0)}
+          />
+        </div>
+        {editedInstrument.barrier !== undefined && (
+          <div>
+            <Label htmlFor="edit-barrier">Barrier 1</Label>
+            <Input
+              id="edit-barrier"
+              type="number"
+              step="0.0001"
+              value={editedInstrument.barrier || 0}
+              onChange={(e) => updateField('barrier', parseFloat(e.target.value) || 0)}
+            />
+          </div>
+        )}
+        {editedInstrument.secondBarrier !== undefined && (
+          <div>
+            <Label htmlFor="edit-second-barrier">Barrier 2</Label>
+            <Input
+              id="edit-second-barrier"
+              type="number"
+              step="0.0001"
+              value={editedInstrument.secondBarrier || 0}
+              onChange={(e) => updateField('secondBarrier', parseFloat(e.target.value) || 0)}
+            />
+          </div>
+        )}
+        {editedInstrument.rebate !== undefined && (
+          <div>
+            <Label htmlFor="edit-rebate">Rebate (%)</Label>
+            <Input
+              id="edit-rebate"
+              type="number"
+              step="0.01"
+              value={editedInstrument.rebate || 0}
+              onChange={(e) => updateField('rebate', parseFloat(e.target.value) || 0)}
+            />
+          </div>
+        )}
+        <div>
+          <Label htmlFor="edit-notional">Notional</Label>
+          <Input
+            id="edit-notional"
+            type="number"
+            step="1000"
+            value={editedInstrument.notional || 0}
+            onChange={(e) => updateField('notional', parseFloat(e.target.value) || 0)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="edit-maturity">Maturity Date</Label>
+          <Input
+            id="edit-maturity"
+            type="date"
+            value={editedInstrument.maturity}
+            onChange={(e) => updateField('maturity', e.target.value)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="edit-status">Status</Label>
+          <Select value={editedInstrument.status} onValueChange={(value) => updateField('status', value)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="Active">Active</SelectItem>
+              <SelectItem value="Inactive">Inactive</SelectItem>
+              <SelectItem value="Expired">Expired</SelectItem>
+              <SelectItem value="Settled">Settled</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button onClick={handleSave}>
+          Save Changes
+        </Button>
+      </DialogFooter>
+    </div>
   );
 };
 

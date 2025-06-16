@@ -42,6 +42,28 @@ export interface HedgingInstrument {
   realOptionPrice?: number;  // Actual option price from calculations (Call Price 1, Put Price 2, etc.)
   impliedVolatility?: number; // IV from Detailed Results
   optionIndex?: number;       // Index of the option in the strategy for mapping
+  // New fields for detailed period information
+  periodIndex?: number;       // Index of the period in the detailed results
+  periodDate?: string;        // Date of the period
+  timeToMaturity?: number;    // Time to maturity for this specific period
+  forwardPrice?: number;      // Forward price for this period
+  realPrice?: number;         // Real price for this period
+  dynamicStrikeInfo?: {       // Dynamic strike information if applicable
+    calculatedStrike: number;
+    calculatedStrikePercent: string;
+    forwardRate: number;
+    timeToMaturity: number;
+  };
+  customPrice?: number;       // Custom price if used
+  repricingData?: {           // Complete repricing information
+    underlyingPrice: number;
+    timeToMaturity: number;
+    domesticRate: number;
+    foreignRate: number;
+    volatility: number;
+    dividendYield: number;
+    pricingModel: string;
+  };
 }
 
 class StrategyImportService {
@@ -158,106 +180,178 @@ class StrategyImportService {
   ): HedgingInstrument[] {
     const instruments: HedgingInstrument[] = [];
     
-    // Calculate maturity dates using the same logic as Index.tsx
-    const maturityDates = this.calculateMaturityDates(
-      params.startDate, 
-      params.monthsToHedge,
-      params.useCustomPeriods,
-      params.customPeriods
-    );
-    
-    // Use the last maturity date as the instrument maturity (representing the final hedge period)
-    const finalMaturityDate = maturityDates[maturityDates.length - 1];
-
-    components.forEach((component, index) => {
-      const instrumentId = `HDG-${timestamp}-${index + 1}`;
-      const notional = this.calculateNotional(component, params);
-      const strike = this.calculateStrike(component, params.spotPrice);
-
-      let instrumentType = this.mapComponentTypeToInstrument(component.type);
+    if (!detailedResults || detailedResults.length === 0) {
+      // Fallback: comportement original si pas de résultats détaillés
+      const maturityDates = this.calculateMaturityDates(
+        params.startDate, 
+        params.monthsToHedge,
+        params.useCustomPeriods,
+        params.customPeriods
+      );
       
-      // Extract real data from detailed results if available
-      let realOptionPrice: number | undefined;
-      let impliedVolatility: number | undefined;
-      
-      if (detailedResults && detailedResults.length > 0) {
-        // Use the first result row as representative (could be enhanced to use average or latest)
-        const firstResult = detailedResults[0];
+      const finalMaturityDate = maturityDates[maturityDates.length - 1];
+
+      components.forEach((component, index) => {
+        const instrumentId = `HDG-${timestamp}-${index + 1}`;
+        const notional = this.calculateNotional(component, params);
+        const strike = this.calculateStrike(component, params.spotPrice);
+        let instrumentType = this.mapComponentTypeToInstrument(component.type);
         
-        // Extract option price for this specific component
-        if (firstResult.optionPrices && firstResult.optionPrices[index]) {
-          realOptionPrice = firstResult.optionPrices[index].price;
+        const baseInstrument: HedgingInstrument = {
+          id: instrumentId,
+          type: instrumentType,
+          currency: params.currencyPair.symbol,
+          notional: Math.abs(notional),
+          maturity: finalMaturityDate,
+          status: 'active',
+          mtm: 0,
+          hedge_accounting: true,
+          effectiveness_ratio: 95,
+          counterparty: 'Strategy Import',
+          volatility: component.volatility,
+          quantity: component.quantity,
+          originalComponent: component,
+          strategyName,
+          importedAt: timestamp,
+          optionIndex: index
+        };
+
+        if (component.type === 'call' || component.type === 'put' || 
+            component.type.includes('call') || component.type.includes('put')) {
+          baseInstrument.strike = strike;
+          baseInstrument.premium = this.estimatePremium(component, params);
         }
+
+        if (component.type === 'forward' || component.type === 'swap') {
+          baseInstrument.strike = strike;
+        }
+
+        // Ajouter les barrières SEULEMENT pour les options barrières
+        if (component.type.includes('knockout') || component.type.includes('knockin') || 
+            component.type.includes('touch') || component.type.includes('binary')) {
+          if (component.barrier !== undefined) {
+            baseInstrument.barrier = component.barrierType === 'percent' 
+              ? params.spotPrice * (component.barrier / 100)
+              : component.barrier;
+          }
+
+          if (component.secondBarrier !== undefined) {
+            baseInstrument.secondBarrier = component.barrierType === 'percent'
+              ? params.spotPrice * (component.secondBarrier / 100)
+              : component.secondBarrier;
+          }
+        }
+
+        if (component.rebate) {
+          baseInstrument.rebate = component.rebate;
+        }
+
+        instruments.push(baseInstrument);
+      });
+    } else {
+      // Nouveau comportement: créer un instrument pour chaque période et chaque composant
+      detailedResults.forEach((periodResult, periodIndex) => {
+        const periodDate = new Date(periodResult.date);
+        const maturityDateStr = periodDate.toISOString().split('T')[0];
         
-        // Extract implied volatility - this could come from different sources
-        // Priority: component-specific IV > global IV > component volatility
-        if (firstResult.impliedVolatilities) {
-          const optionKey = `${component.type}-${index}`;
-          impliedVolatility = firstResult.impliedVolatilities[optionKey] || 
-                             firstResult.impliedVolatilities.global ||
-                             component.volatility;
-        } else {
-          impliedVolatility = component.volatility;
-        }
-      }
-      
-      const baseInstrument: HedgingInstrument = {
-        id: instrumentId,
-        type: instrumentType,
-        currency: params.currencyPair.symbol,
-        notional: Math.abs(notional),
-        maturity: finalMaturityDate,
-        status: 'active',
-        mtm: 0, // Will be calculated later
-        hedge_accounting: true,
-        effectiveness_ratio: 95,
-        counterparty: 'Strategy Import',
-        volatility: component.volatility, // Original volatility from strategy
-        quantity: component.quantity,
-        originalComponent: component,
-        strategyName,
-        importedAt: timestamp,
-        // Real data from Detailed Results
-        realOptionPrice: realOptionPrice,
-        impliedVolatility: impliedVolatility,
-        optionIndex: index
-      };
+        // Extraire les détails de stratégie du résultat enrichi
+        const strategyDetails = periodResult.strategyDetails || [];
+        
+        components.forEach((component, componentIndex) => {
+          const strategyDetail = strategyDetails[componentIndex];
+          const instrumentId = `HDG-${timestamp}-P${periodIndex + 1}-C${componentIndex + 1}`;
+          
+          // Calculer le notional pour cette période spécifique
+          const periodVolume = periodResult.monthlyVolume || (params.baseVolume / detailedResults.length);
+          const notional = Math.abs(component.quantity / 100) * periodVolume;
+          
+          let instrumentType = this.mapComponentTypeToInstrument(component.type);
+          
+          // Utiliser les informations enrichies si disponibles
+          const absoluteStrike = strategyDetail?.absoluteStrike || this.calculateStrike(component, params.spotPrice);
+          const effectiveVolatility = strategyDetail?.effectiveVolatility || component.volatility;
+          const realOptionPrice = strategyDetail?.calculatedPrice || periodResult.optionPrices?.[componentIndex]?.price;
+          
+          const instrument: HedgingInstrument = {
+            id: instrumentId,
+            type: instrumentType,
+            currency: params.currencyPair.symbol,
+            notional: notional,
+            maturity: maturityDateStr,
+            status: 'active',
+            mtm: 0, // Sera calculé plus tard
+            hedge_accounting: true,
+            effectiveness_ratio: 95,
+            counterparty: 'Strategy Import',
+            volatility: component.volatility,
+            quantity: component.quantity,
+            originalComponent: component,
+            strategyName: `${strategyName} [P${periodIndex + 1}]`,
+            importedAt: timestamp,
+            // Nouvelles informations enrichies
+            realOptionPrice: realOptionPrice,
+            impliedVolatility: effectiveVolatility,
+            optionIndex: componentIndex,
+            // Période et informations détaillées
+            periodIndex: periodIndex,
+            periodDate: periodResult.date,
+            timeToMaturity: periodResult.timeToMaturity,
+            forwardPrice: periodResult.forward,
+            realPrice: strategyDetail?.repricingData?.underlyingPrice || periodResult.realPrice,
+            // Informations de re-pricing complètes
+            repricingData: strategyDetail?.repricingData
+          };
 
-      // Add specific fields based on instrument type
-      if (component.type === 'call' || component.type === 'put' || 
-          component.type.includes('call') || component.type.includes('put')) {
-        baseInstrument.strike = strike;
-        // Use real option price if available, otherwise estimate
-        baseInstrument.premium = realOptionPrice || this.estimatePremium(component, params);
-      }
+          // Ajouter le strike en valeur absolue
+          if (component.type === 'call' || component.type === 'put' || 
+              component.type.includes('call') || component.type.includes('put') ||
+              component.type === 'forward' || component.type === 'swap') {
+            instrument.strike = absoluteStrike;
+            instrument.premium = realOptionPrice || this.estimatePremium(component, params);
+          }
 
-      if (component.type === 'forward') {
-        baseInstrument.strike = strike;
-      }
+          // Ajouter les barrières en valeur absolue SEULEMENT pour les options barrières
+          if (component.type.includes('knockout') || component.type.includes('knockin') || 
+              component.type.includes('touch') || component.type.includes('binary')) {
+            if (strategyDetail?.absoluteBarrier !== undefined) {
+              instrument.barrier = strategyDetail.absoluteBarrier;
+            } else if (component.barrier !== undefined) {
+              instrument.barrier = component.barrierType === 'percent' 
+                ? params.spotPrice * (component.barrier / 100)
+                : component.barrier;
+            }
 
-      if (component.type === 'swap') {
-        baseInstrument.strike = strike;
-      }
+            if (strategyDetail?.absoluteSecondBarrier !== undefined) {
+              instrument.secondBarrier = strategyDetail.absoluteSecondBarrier;
+            } else if (component.secondBarrier !== undefined) {
+              instrument.secondBarrier = component.barrierType === 'percent'
+                ? params.spotPrice * (component.secondBarrier / 100)
+                : component.secondBarrier;
+            }
+          }
 
-      // Add barrier information for barrier options
-      if (component.barrier) {
-        baseInstrument.barrier = component.barrierType === 'percent' 
-          ? params.spotPrice * (component.barrier / 100)
-          : component.barrier;
-      }
+          // Ajouter la rebate pour les options digitales
+          if (component.rebate !== undefined) {
+            instrument.rebate = component.rebate;
+          } else if (component.type.includes('touch') || component.type.includes('binary') || component.type.includes('digital')) {
+            // Pour les options digitales sans rebate explicite, utiliser une valeur par défaut
+            instrument.rebate = 5; // 5% par défaut pour les options digitales
+          }
 
-      if (component.secondBarrier) {
-        baseInstrument.secondBarrier = component.barrierType === 'percent'
-          ? params.spotPrice * (component.secondBarrier / 100)
-          : component.secondBarrier;
-      }
+          // Ajouter les informations de strike dynamique si disponibles
+          if (strategyDetail?.dynamicStrikeInfo) {
+            instrument.dynamicStrikeInfo = strategyDetail.dynamicStrikeInfo;
+          }
 
-      if (component.rebate) {
-        baseInstrument.rebate = component.rebate;
-      }
+          // Ajouter les prix personnalisés si utilisés
+          if (strategyDetail?.customPrice !== undefined) {
+            instrument.customPrice = strategyDetail.customPrice;
+          }
 
-      instruments.push(baseInstrument);
-    });
+          instruments.push(instrument);
+        });
+      });
+    }
 
     return instruments;
   }
