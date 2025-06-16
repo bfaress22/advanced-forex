@@ -309,14 +309,32 @@ const HedgingInstruments = () => {
   };
 
   // Fonction calculateTodayPrice améliorée pour utiliser les données enrichies d'export
+  // Note: La fonction calculateBarrierOptionClosedForm a été déplacée vers PricingService
+  // avec une implémentation complète pour les options à double barrière
+
   const calculateTodayPrice = (instrument: HedgingInstrument): number => {
     // Paramètres de marché dynamiques (spot, taux, vol) et timeToMaturity recalculé à chaque rendu
     const marketData = currencyMarketData[instrument.currency] || getDefaultMarketDataForCurrency(instrument.currency);
     const S = marketData.spot;
     const r_d = marketData.domesticRate / 100;
     const r_f = marketData.foreignRate / 100;
-    const sigma = instrument.impliedVolatility ? (instrument.impliedVolatility / 100) : (marketData.volatility / 100);
-    const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
+    // Prioriser la volatilité des Strategy Components (originalComponent)
+    let sigma;
+    if (instrument.impliedVolatility) {
+      // 1. Priorité : Volatilité implicite spécifique
+      sigma = instrument.impliedVolatility / 100;
+    } else if (instrument.originalComponent && instrument.originalComponent.volatility) {
+      // 2. Priorité : Volatilité des Strategy Components (10% dans votre cas)
+      sigma = instrument.originalComponent.volatility / 100;
+    } else if (instrument.volatility) {
+      // 3. Priorité : Volatilité de l'instrument lui-même
+      sigma = instrument.volatility / 100;
+    } else {
+      // 4. Fallback : Volatilité des données de marché
+      sigma = marketData.volatility / 100;
+    }
+    // Prioriser le timeToMaturity des Detailed Results (même valeur que Strategy Builder)
+    const timeToMaturity = instrument.timeToMaturity || calculateTimeToMaturity(instrument.maturity, valuationDate);
     
     // Vérifier l'expiration
     if (timeToMaturity <= 0) {
@@ -330,6 +348,8 @@ const HedgingInstruments = () => {
     const optionType = instrument.type.toLowerCase();
     // DEBUG: Log des paramètres pour diagnostiquer
     console.log(`[DEBUG] Instrument ${instrument.id}: params S=${S}, r_d=${r_d}, r_f=${r_f}, t=${timeToMaturity}, sigma=${sigma}`);
+    console.log(`[DEBUG] Instrument ${instrument.id}: volatility source - impliedVol: ${instrument.impliedVolatility}, originalComponent: ${instrument.originalComponent?.volatility}, instrument: ${instrument.volatility}, market: ${marketData.volatility}`);
+    console.log(`[DEBUG] Instrument ${instrument.id}: timeToMaturity source - detailedResults: ${instrument.timeToMaturity}, calculated: ${calculateTimeToMaturity(instrument.maturity, valuationDate)}`);
     
     // STRATÉGIE DE PRICING SELON LE TYPE D'INSTRUMENT
     // IMPORTANT: Ordre des conditions critique - les plus spécifiques d'abord !
@@ -352,8 +372,30 @@ const HedgingInstruments = () => {
       
       // MAPPING CORRECT DES TYPES POUR LE PRICING SERVICE
       let pricingType = "";
-      if (optionType.includes('knock-out') || optionType.includes('knockout') || optionType.includes('reverse')) {
-    if (optionType.includes('call')) {
+      
+      // 1. OPTIONS À DOUBLE BARRIÈRE - PRIORITÉ ABSOLUE
+      if (optionType.includes('double')) {
+        if (optionType.includes('knock-out') || optionType.includes('knockout')) {
+          if (optionType.includes('call')) {
+            pricingType = "call-double-knockout";
+            console.log(`[DEBUG] ${instrument.id}: Call-double-knockout detected`);
+          } else if (optionType.includes('put')) {
+            pricingType = "put-double-knockout";
+            console.log(`[DEBUG] ${instrument.id}: Put-double-knockout detected`);
+          }
+        } else if (optionType.includes('knock-in') || optionType.includes('knockin')) {
+          if (optionType.includes('call')) {
+            pricingType = "call-double-knockin";
+            console.log(`[DEBUG] ${instrument.id}: Call-double-knockin detected`);
+          } else if (optionType.includes('put')) {
+            pricingType = "put-double-knockin";
+            console.log(`[DEBUG] ${instrument.id}: Put-double-knockin detected`);
+          }
+        }
+      }
+      // 2. OPTIONS À BARRIÈRE SIMPLE
+      else if (optionType.includes('knock-out') || optionType.includes('knockout') || optionType.includes('reverse')) {
+        if (optionType.includes('call')) {
           if (optionType.includes('reverse')) {
             pricingType = "call-reverse-knockout";
             console.log(`[DEBUG] ${instrument.id}: Call-reverse-knockout mapped to call-reverse-knockout`);
@@ -390,16 +432,17 @@ const HedgingInstruments = () => {
           // Pour les reverse, on garde les paramètres originaux mais on change le type de pricing
         }
         
+        // Utiliser le PricingService mis à jour avec support des options à double barrière
         const price = PricingService.calculateBarrierOptionClosedForm(
           pricingType,
           S,
           adjustedStrike,
-          r_d,
+          r_d, // Utiliser seulement le taux domestique comme dans Strategy Builder
           timeToMaturity,
           sigma,
           adjustedBarrier,
           secondBarrier,
-          r_f  // Ajouter le taux étranger pour le cost of carry FX
+          r_f // Ajouter le taux étranger pour FX options
         );
         console.log(`[DEBUG] ${instrument.id}: Calculated price: ${price}`);
         return price;
@@ -527,6 +570,49 @@ const HedgingInstruments = () => {
         [field]: value
       }
     }));
+    
+    // Si c'est la volatilité qui change, recalculer automatiquement les prix
+    if (field === 'volatility') {
+      // Force re-render pour recalculer les Today Price
+      setInstruments(prevInstruments => [...prevInstruments]);
+      
+      toast({
+        title: "Volatility Updated",
+        description: `Updated volatility to ${value}% for ${currency}. Today Prices recalculated.`,
+      });
+    }
+  };
+
+  // Fonction pour mettre à jour la volatilité d'un instrument spécifique
+  const updateInstrumentVolatility = (instrumentId: string, volatility: number) => {
+    setInstruments(prevInstruments => 
+      prevInstruments.map(instrument => 
+        instrument.id === instrumentId 
+          ? { ...instrument, impliedVolatility: volatility }
+          : instrument
+      )
+    );
+    
+    toast({
+      title: "Individual Volatility Updated",
+      description: `Updated volatility to ${volatility}% for instrument ${instrumentId}`,
+    });
+  };
+
+  // Fonction pour réinitialiser la volatilité individuelle (utiliser la volatilité globale)
+  const resetInstrumentVolatility = (instrumentId: string) => {
+    setInstruments(prevInstruments => 
+      prevInstruments.map(instrument => 
+        instrument.id === instrumentId 
+          ? { ...instrument, impliedVolatility: undefined }
+          : instrument
+      )
+    );
+    
+    toast({
+      title: "Individual Volatility Reset",
+      description: `Reset to global volatility for instrument ${instrumentId}`,
+    });
   };
 
   // Fonction pour appliquer les données par défaut d'une paire de devises
@@ -864,6 +950,41 @@ const HedgingInstruments = () => {
         </CardContent>
       </Card>
 
+      {/* Individual Volatility Overrides Summary */}
+      {instruments.some(inst => inst.impliedVolatility) && (
+        <Card className="mb-4 border-purple-200 bg-purple-50/50">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium text-purple-700 flex items-center gap-2">
+              <TrendingUp className="h-4 w-4" />
+              Individual Volatility Overrides
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Instruments using custom volatility instead of global market parameters
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="flex flex-wrap gap-2">
+              {instruments
+                .filter(inst => inst.impliedVolatility)
+                .map(inst => (
+                  <Badge key={inst.id} variant="secondary" className="text-xs bg-purple-100 text-purple-700">
+                    {inst.id}: {inst.impliedVolatility?.toFixed(1)}%
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-3 w-3 p-0 ml-1 text-purple-500 hover:text-red-500"
+                      onClick={() => resetInstrumentVolatility(inst.id)}
+                      title="Reset to global volatility"
+                    >
+                      ×
+                    </Button>
+                  </Badge>
+                ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Summary Cards */}
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
@@ -1117,8 +1238,8 @@ const HedgingInstruments = () => {
                         // For long positions: MTM = Today's Price - Original Price  
                         mtmValue = todayPrice - unitPrice;
                       }
-                      // Calculate time to maturity
-                      const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
+                      // Calculate time to maturity - prioriser les données des Detailed Results
+                      const timeToMaturity = instrument.timeToMaturity || calculateTimeToMaturity(instrument.maturity, valuationDate);
                       // Use implied volatility from Detailed Results if available, otherwise use component volatility
                       const volatility = instrument.impliedVolatility || instrument.volatility || 0;
                       // FIX: Le notional contient déjà la quantité appliquée, donc volumeToHedge = notional
@@ -1212,14 +1333,60 @@ const HedgingInstruments = () => {
                             <span className={timeToMaturity <= 0.1 ? "text-red-600 font-medium" : "text-gray-600"}>
                               {timeToMaturity > 0 ? `${(timeToMaturity * 365).toFixed(0)}d` : 'Expired'}
                             </span>
-                          </TableCell>
-                          <TableCell className="font-mono text-center">
-                            {volatility > 0 ? volatility.toFixed(1) + '%' : 'N/A'}
-                            {instrument.impliedVolatility && (
-                              <div className="text-xs text-purple-600">
-                                IV: {instrument.impliedVolatility.toFixed(1)}%
+                            {instrument.timeToMaturity && (
+                              <div className="text-xs text-blue-600">
+                                Exact: {instrument.timeToMaturity.toFixed(4)}y
                               </div>
                             )}
+                          </TableCell>
+                          <TableCell className="font-mono text-center">
+                            <div className="space-y-1">
+                              {/* Volatilité globale (non-éditable, pour référence) */}
+                              <div className="text-xs text-gray-500">
+                                Global: {volatility > 0 ? volatility.toFixed(1) + '%' : 'N/A'}
+                              </div>
+                              
+                              {/* Volatilité individuelle (éditable) */}
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  type="number"
+                                  value={instrument.impliedVolatility || ''}
+                                  onChange={(e) => {
+                                    const value = parseFloat(e.target.value);
+                                    if (!isNaN(value) && value >= 0 && value <= 100) {
+                                      updateInstrumentVolatility(instrument.id, value);
+                                    }
+                                  }}
+                                  placeholder={volatility.toFixed(1)}
+                                  className="w-16 h-6 text-xs text-center"
+                                  step="0.1"
+                                  min="0"
+                                  max="100"
+                                />
+                                <span className="text-xs">%</span>
+                                {instrument.impliedVolatility && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-4 w-4 p-0 text-gray-400 hover:text-red-500"
+                                    onClick={() => resetInstrumentVolatility(instrument.id)}
+                                    title="Reset to global volatility"
+                                  >
+                                    ×
+                                  </Button>
+                                )}
+                              </div>
+                              
+                              {instrument.impliedVolatility ? (
+                                <div className="text-xs text-purple-600 font-medium">
+                                  ✓ Using: {instrument.impliedVolatility.toFixed(1)}%
+                                </div>
+                              ) : (
+                                <div className="text-xs text-blue-600">
+                                  ✓ Using Global: {volatility.toFixed(1)}%
+                                </div>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="font-mono text-right">
                             {instrument.strike ? instrument.strike.toFixed(4) : 'N/A'}

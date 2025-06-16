@@ -453,7 +453,123 @@ export class PricingService {
       return Math.max(0, optionPrice);
     }
     
-    // Pour les options à double barrière, utiliser Monte Carlo pour l'instant
+    // PARTIE 2: Options à double barrière - implémentation complète depuis Index.tsx
+    else if (secondBarrier && optionType.includes('double')) {
+      // Paramètres pour les options à double barrière selon le code VBA
+      const X = K; // Strike price
+      const L = Math.min(barrier, secondBarrier); // Barrière inférieure
+      const U = Math.max(barrier, secondBarrier); // Barrière supérieure
+      
+      // Calculer les paramètres delta selon le code VBA
+      const delta1 = (r - r_f) / (v**2) - 0.5;
+      const delta2 = -r_f / (v**2);
+      
+      // Déterminer le TypeFlag pour les options à double barrière
+      let TypeFlag = "";
+      if (optionType.includes('call-double-knockout')) {
+        TypeFlag = "co"; // Call double-knockout (out)
+      } else if (optionType.includes('call-double-knockin')) {
+        TypeFlag = "ci"; // Call double-knockin (in)
+      } else if (optionType.includes('put-double-knockout')) {
+        TypeFlag = "po"; // Put double-knockout (out)
+      } else if (optionType.includes('put-double-knockin')) {
+        TypeFlag = "pi"; // Put double-knockin (in)
+      }
+      
+      // Si le type n'est pas reconnu, utiliser Monte Carlo
+      if (TypeFlag === "") {
+        return this.calculateBarrierOptionPrice(optionType, S, K, r, t, sigma, barrier, secondBarrier, 1000);
+      }
+      
+      // Calculer les variables F et E selon le code VBA
+      const F = U * Math.exp(delta1 * T);
+      const E = L * Math.exp(delta1 * T);
+      
+      let Sum1 = 0;
+      let Sum2 = 0;
+      
+      // Pour les options call double-barrière (ci/co)
+      if (TypeFlag === "co" || TypeFlag === "ci") {
+        // Somme sur un nombre fini de termes (-5 à 5 dans le code VBA)
+        for (let n = -5; n <= 5; n++) {
+          const d1 = (Math.log(S * U ** (2 * n) / (X * L ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d2 = (Math.log(S * U ** (2 * n) / (F * L ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d3 = (Math.log(L ** (2 * n + 2) / (X * S * U ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d4 = (Math.log(L ** (2 * n + 2) / (F * S * U ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          
+          const mu1 = 2 * (b - delta2 - n * (delta1 - delta2)) / v ** 2 + 1;
+          const mu2 = 2 * n * (delta1 - delta2) / v ** 2;
+          const mu3 = 2 * (b - delta2 + n * (delta1 - delta2)) / v ** 2 + 1;
+          
+          Sum1 += (U ** n / L ** n) ** mu1 * (L / S) ** mu2 * (CND(d1) - CND(d2)) - 
+                (L ** (n + 1) / (U ** n * S)) ** mu3 * (CND(d3) - CND(d4));
+                
+          Sum2 += (U ** n / L ** n) ** (mu1 - 2) * (L / S) ** mu2 * (CND(d1 - v * Math.sqrt(T)) - CND(d2 - v * Math.sqrt(T))) - 
+                (L ** (n + 1) / (U ** n * S)) ** (mu3 - 2) * (CND(d3 - v * Math.sqrt(T)) - CND(d4 - v * Math.sqrt(T)));
+        }
+      }
+      // Pour les options put double-barrière (pi/po)
+      else if (TypeFlag === "po" || TypeFlag === "pi") {
+        // Somme sur un nombre fini de termes (-5 à 5 dans le code VBA)
+        for (let n = -5; n <= 5; n++) {
+          const d1 = (Math.log(S * U ** (2 * n) / (E * L ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d2 = (Math.log(S * U ** (2 * n) / (X * L ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d3 = (Math.log(L ** (2 * n + 2) / (E * S * U ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          const d4 = (Math.log(L ** (2 * n + 2) / (X * S * U ** (2 * n))) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+          
+          const mu1 = 2 * (b - delta2 - n * (delta1 - delta2)) / v ** 2 + 1;
+          const mu2 = 2 * n * (delta1 - delta2) / v ** 2;
+          const mu3 = 2 * (b - delta2 + n * (delta1 - delta2)) / v ** 2 + 1;
+          
+          Sum1 += (U ** n / L ** n) ** mu1 * (L / S) ** mu2 * (CND(d1) - CND(d2)) - 
+                (L ** (n + 1) / (U ** n * S)) ** mu3 * (CND(d3) - CND(d4));
+                
+          Sum2 += (U ** n / L ** n) ** (mu1 - 2) * (L / S) ** mu2 * (CND(d1 - v * Math.sqrt(T)) - CND(d2 - v * Math.sqrt(T))) - 
+                (L ** (n + 1) / (U ** n * S)) ** (mu3 - 2) * (CND(d3 - v * Math.sqrt(T)) - CND(d4 - v * Math.sqrt(T)));
+        }
+      }
+      
+      // Calculer OutValue selon le type d'option
+      let OutValue = 0;
+      if (TypeFlag === "co" || TypeFlag === "ci") {
+        OutValue = S * Math.exp((b - r) * T) * Sum1 - X * Math.exp(-r * T) * Sum2;
+      } else if (TypeFlag === "po" || TypeFlag === "pi") {
+        OutValue = X * Math.exp(-r * T) * Sum2 - S * Math.exp((b - r) * T) * Sum1;
+      }
+      
+      // Fonction pour calculer le prix Black-Scholes standard
+      const GBlackScholes = (type: string, S: number, X: number, T: number, r: number, b: number, v: number) => {
+        const d1 = (Math.log(S / X) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
+        const d2 = d1 - v * Math.sqrt(T);
+        
+        if (type === "c") {
+          return S * Math.exp((b - r) * T) * CND(d1) - X * Math.exp(-r * T) * CND(d2);
+        } else { // type === "p"
+          return X * Math.exp(-r * T) * CND(-d2) - S * Math.exp((b - r) * T) * CND(-d1);
+        }
+      };
+      
+      // Calculer le prix final selon le TypeFlag (appliquer la relation de parité pour les knockin)
+      let optionPrice = 0;
+      if (TypeFlag === "co") {
+        optionPrice = OutValue;
+      } else if (TypeFlag === "po") {
+        optionPrice = OutValue;
+      } else if (TypeFlag === "ci") {
+        // Pour les options knockin, utiliser la relation: knockin + knockout = vanille
+        optionPrice = GBlackScholes("c", S, X, T, r, b, v) - OutValue;
+      } else if (TypeFlag === "pi") {
+        // Pour les options knockin, utiliser la relation: knockin + knockout = vanille
+        optionPrice = GBlackScholes("p", S, X, T, r, b, v) - OutValue;
+      }
+      
+      console.log(`[PRICING] Double barrier ${optionType}: TypeFlag=${TypeFlag}, OutValue=${OutValue}, Final Price=${optionPrice}`);
+      
+      // S'assurer que le prix de l'option n'est jamais négatif
+      return Math.max(0, optionPrice);
+    }
+    
+    // Si nous arrivons ici, c'est que le type d'option n'est pas supporté
     return 0;
   }
 
@@ -475,17 +591,15 @@ export class PricingService {
     if (type.includes('knockout') || type.includes('knockin')) {
       if (!barrier) return 0;
       
-      // Use closed-form for single barrier options
-      if (!type.includes('double') && !secondBarrier) {
-        const closedFormPrice = this.calculateBarrierOptionClosedForm(
-          type, S, K, r_d, t, sigma, barrier, secondBarrier, r_f
-        );
-        if (closedFormPrice > 0) {
-          return closedFormPrice;
-        }
+      // Use closed-form for both single and double barrier options
+      const closedFormPrice = this.calculateBarrierOptionClosedForm(
+        type, S, K, r_d, t, sigma, barrier, secondBarrier, r_f
+      );
+      if (closedFormPrice > 0) {
+        return closedFormPrice;
       }
       
-      // Fallback to Monte Carlo for double barriers or if closed-form fails
+      // Fallback to Monte Carlo if closed-form fails
       return this.calculateBarrierOptionPrice(
         type, S, K, r_d, t, sigma, barrier, secondBarrier, numSimulations
       );
