@@ -520,21 +520,21 @@ const RiskAnalysis = () => {
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Date de Valuation */}
-            <div>
+              <div>
               <Label className="flex items-center gap-2 mb-2">
                 <Calendar className="h-4 w-4" />
                 Date de Valuation
               </Label>
               <div className="grid grid-cols-2 gap-3">
-                <div>
+              <div>
                   <Label className="text-sm text-muted-foreground">Base</Label>
                   <Input
                     type="date"
                     value={baseValuationDate}
                     onChange={(e) => setBaseValuationDate(e.target.value)}
-                  />
-                </div>
-                <div>
+                />
+              </div>
+              <div>
                   <Label className="text-sm text-muted-foreground">Stressée (+{timeShift[0]} jours)</Label>
                   <Input
                     type="date"
@@ -578,10 +578,10 @@ const RiskAnalysis = () => {
               >
                 Appliquer à Tous les Instruments
               </Button>
-            </div>
+              </div>
 
             {/* Boutons de Contrôle */}
-            <div className="flex gap-2">
+              <div className="flex gap-2">
               <Button 
                 onClick={runStressTest} 
                 className="flex-1"
@@ -593,10 +593,10 @@ const RiskAnalysis = () => {
                   <Play className="h-4 w-4 mr-2" />
                 )}
                 {isRunningStressTest ? "Calcul..." : "Lancer Stress Test"}
-              </Button>
+                </Button>
               <Button variant="outline" onClick={resetToBaseParameters}>
                 <RotateCcw className="h-4 w-4" />
-              </Button>
+                </Button>
             </div>
           </CardContent>
         </Card>
@@ -673,7 +673,7 @@ const RiskAnalysis = () => {
                     <div className="font-medium text-sm">{instrument.id}</div>
                     <div className="text-xs text-muted-foreground">{instrument.type} • {instrument.currency}</div>
                   </div>
-                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3">
                     <div className="text-xs text-center">
                       <div className="text-muted-foreground">Base</div>
                       <div className="font-mono">{baseVol.toFixed(1)}%</div>
@@ -704,7 +704,7 @@ const RiskAnalysis = () => {
                 </div>
               );
             })}
-          </div>
+              </div>
         </CardContent>
       </Card>
 
