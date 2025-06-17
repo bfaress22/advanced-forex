@@ -170,6 +170,24 @@ const HedgingInstruments = () => {
     };
   }, [importService]);
 
+  // Force re-calculation when valuation date changes
+  useEffect(() => {
+    if (instruments.length > 0) {
+      console.log(`[DEBUG] Valuation date changed to ${valuationDate}, forcing recalculation of all Today Prices`);
+      // Force re-render to recalculate all Today Prices with new valuation date
+      setInstruments([...instruments]);
+    }
+  }, [valuationDate]);
+
+  // Force re-calculation when market parameters change (spot, volatility, rates)
+  useEffect(() => {
+    if (instruments.length > 0) {
+      console.log(`[DEBUG] Market parameters changed, forcing recalculation of all Today Prices`);
+      // Force re-render to recalculate all Today Prices with new market parameters
+      setInstruments([...instruments]);
+    }
+  }, [currencyMarketData]);
+
   // Utiliser exactement la même logique de pricing que Strategy Builder
 
   const calculateTimeToMaturity = (maturityDate: string, valuationDate: string): number => {
@@ -315,9 +333,9 @@ const HedgingInstruments = () => {
   const calculateTodayPrice = (instrument: HedgingInstrument): number => {
     // Paramètres de marché dynamiques (spot, taux, vol) et timeToMaturity recalculé à chaque rendu
     const marketData = currencyMarketData[instrument.currency] || getDefaultMarketDataForCurrency(instrument.currency);
-    const S = marketData.spot;
     const r_d = marketData.domesticRate / 100;
     const r_f = marketData.foreignRate / 100;
+    const currentSpot = marketData.spot;
     // Prioriser la volatilité des Strategy Components (originalComponent)
     let sigma;
     if (instrument.impliedVolatility) {
@@ -333,8 +351,15 @@ const HedgingInstruments = () => {
       // 4. Fallback : Volatilité des données de marché
       sigma = marketData.volatility / 100;
     }
-    // Prioriser le timeToMaturity des Detailed Results (même valeur que Strategy Builder)
-    const timeToMaturity = instrument.timeToMaturity || calculateTimeToMaturity(instrument.maturity, valuationDate);
+    // Recalculer le timeToMaturity en utilisant la Valuation Date actuelle des MTM Parameters
+    const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
+    
+    // IMPORTANT: Toujours utiliser le spot actuel pour permettre l'ajustement dynamique des prix
+    // Calculer le forward à partir du spot actuel et des taux d'intérêt actuels
+    const S = currentSpot * Math.exp((r_d - r_f) * timeToMaturity); // Forward calculé dynamiquement
+    
+    console.log(`[DEBUG] ${instrument.id}: Time to maturity calculated from valuation date ${valuationDate} to maturity ${instrument.maturity}: ${timeToMaturity.toFixed(4)} years`);
+    console.log(`[DEBUG] ${instrument.id}: Using current spot ${currentSpot.toFixed(4)} -> forward ${S.toFixed(4)} (r_d=${(r_d*100).toFixed(1)}%, r_f=${(r_f*100).toFixed(1)}%, t=${timeToMaturity.toFixed(4)})`);
     
     // Vérifier l'expiration
     if (timeToMaturity <= 0) {
@@ -346,6 +371,68 @@ const HedgingInstruments = () => {
     
     // Map instrument type to option type pour pricing
     const optionType = instrument.type.toLowerCase();
+    
+    // Pour les options à barrière, vérifier si le spot actuel a franchi les barrières
+    if (optionType.includes('knock') || optionType.includes('barrier')) {
+      const barrier = instrument.barrier;
+      const secondBarrier = instrument.secondBarrier;
+      
+      if (barrier) {
+        console.log(`[DEBUG] ${instrument.id}: Barrier analysis - spot=${currentSpot.toFixed(4)}, barrier=${barrier.toFixed(4)}`);
+        
+        if (secondBarrier) {
+          const lowerBarrier = Math.min(barrier, secondBarrier);
+          const upperBarrier = Math.max(barrier, secondBarrier);
+          const spotOutsideRange = currentSpot <= lowerBarrier || currentSpot >= upperBarrier;
+          console.log(`[DEBUG] ${instrument.id}: Double barrier analysis - spot=${currentSpot.toFixed(4)}, lower=${lowerBarrier.toFixed(4)}, upper=${upperBarrier.toFixed(4)}, outside=${spotOutsideRange}`);
+          
+          // Pour les double knock-out: si le spot est en dehors des barrières, l'option est déjà knockée
+          if (optionType.includes('knock-out') && spotOutsideRange) {
+            console.log(`[DEBUG] ${instrument.id}: Double knock-out option already knocked out (spot outside barriers)`);
+            return 0;
+          }
+          
+          // Pour les double knock-in: si le spot est en dehors des barrières, l'option est activée
+          if (optionType.includes('knock-in') && spotOutsideRange) {
+            console.log(`[DEBUG] ${instrument.id}: Double knock-in option activated (spot outside barriers)`);
+            // Continuer avec le pricing normal d'une option vanille
+          }
+        } else {
+          // Barrière simple
+          let barrierCrossed = false;
+          
+          if (optionType.includes('reverse')) {
+            // Pour les reverse barriers, la logique est inversée
+            if (optionType.includes('call')) {
+              barrierCrossed = currentSpot <= barrier; // Call reverse: knocked si spot en dessous
+            } else {
+              barrierCrossed = currentSpot >= barrier; // Put reverse: knocked si spot au dessus
+            }
+          } else {
+            // Barrières normales
+            if (optionType.includes('call')) {
+              barrierCrossed = currentSpot >= barrier; // Call: knocked si spot au dessus
+            } else {
+              barrierCrossed = currentSpot <= barrier; // Put: knocked si spot en dessous
+            }
+          }
+          
+          console.log(`[DEBUG] ${instrument.id}: Single barrier analysis - barrierCrossed=${barrierCrossed}`);
+          
+          // Pour les knock-out: si barrière franchie, option knockée
+          if (optionType.includes('knock-out') && barrierCrossed) {
+            console.log(`[DEBUG] ${instrument.id}: Knock-out option already knocked out`);
+            return 0;
+          }
+          
+          // Pour les knock-in: si barrière franchie, option activée
+          if (optionType.includes('knock-in') && barrierCrossed) {
+            console.log(`[DEBUG] ${instrument.id}: Knock-in option activated`);
+            // Continuer avec le pricing normal d'une option vanille
+          }
+        }
+      }
+    }
     // DEBUG: Log des paramètres pour diagnostiquer
     console.log(`[DEBUG] Instrument ${instrument.id}: params S=${S}, r_d=${r_d}, r_f=${r_f}, t=${timeToMaturity}, sigma=${sigma}`);
     console.log(`[DEBUG] Instrument ${instrument.id}: volatility source - impliedVol: ${instrument.impliedVolatility}, originalComponent: ${instrument.originalComponent?.volatility}, instrument: ${instrument.volatility}, market: ${marketData.volatility}`);
@@ -395,7 +482,7 @@ const HedgingInstruments = () => {
       }
       // 2. OPTIONS À BARRIÈRE SIMPLE
       else if (optionType.includes('knock-out') || optionType.includes('knockout') || optionType.includes('reverse')) {
-        if (optionType.includes('call')) {
+    if (optionType.includes('call')) {
           if (optionType.includes('reverse')) {
             pricingType = "call-reverse-knockout";
             console.log(`[DEBUG] ${instrument.id}: Call-reverse-knockout mapped to call-reverse-knockout`);
@@ -1364,7 +1451,7 @@ const HedgingInstruments = () => {
                                   max="100"
                                 />
                                 <span className="text-xs">%</span>
-                                {instrument.impliedVolatility && (
+                            {instrument.impliedVolatility && (
                                   <Button
                                     variant="ghost"
                                     size="sm"
@@ -1384,8 +1471,8 @@ const HedgingInstruments = () => {
                               ) : (
                                 <div className="text-xs text-blue-600">
                                   ✓ Using Global: {volatility.toFixed(1)}%
-                                </div>
-                              )}
+                              </div>
+                            )}
                             </div>
                           </TableCell>
                           <TableCell className="font-mono text-right">

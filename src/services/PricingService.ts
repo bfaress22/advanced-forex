@@ -453,18 +453,18 @@ export class PricingService {
       return Math.max(0, optionPrice);
     }
     
-    // PARTIE 2: Options à double barrière - implémentation complète depuis Index.tsx
+    // PARTIE 2: Options à double barrière - implémentation identique au Strategy Builder
     else if (secondBarrier && optionType.includes('double')) {
-      // Paramètres pour les options à double barrière selon le code VBA
+      // Variables pour les options à double barrière selon le code VBA (Strategy Builder)
       const X = K; // Strike price
       const L = Math.min(barrier, secondBarrier); // Barrière inférieure
       const U = Math.max(barrier, secondBarrier); // Barrière supérieure
       
-      // Calculer les paramètres delta selon le code VBA
-      const delta1 = (r - r_f) / (v**2) - 0.5;
-      const delta2 = -r_f / (v**2);
+      // Paramètres pour les formules de double barrière (identiques au Strategy Builder)
+      const delta1 = 0; // Taux de croissance des barrières (généralement 0)
+      const delta2 = 0; // Taux de dividende (dans notre cas, 0)
       
-      // Déterminer le TypeFlag pour les options à double barrière
+      // Déterminer le TypeFlag en fonction du type d'option
       let TypeFlag = "";
       if (optionType.includes('call-double-knockout')) {
         TypeFlag = "co"; // Call double-knockout (out)
@@ -537,7 +537,7 @@ export class PricingService {
         OutValue = X * Math.exp(-r * T) * Sum2 - S * Math.exp((b - r) * T) * Sum1;
       }
       
-      // Fonction pour calculer le prix Black-Scholes standard
+      // Fonction pour calculer le prix Black-Scholes standard (identique au Strategy Builder)
       const GBlackScholes = (type: string, S: number, X: number, T: number, r: number, b: number, v: number) => {
         const d1 = (Math.log(S / X) + (b + v ** 2 / 2) * T) / (v * Math.sqrt(T));
         const d2 = d1 - v * Math.sqrt(T);
@@ -592,11 +592,11 @@ export class PricingService {
       if (!barrier) return 0;
       
       // Use closed-form for both single and double barrier options
-      const closedFormPrice = this.calculateBarrierOptionClosedForm(
-        type, S, K, r_d, t, sigma, barrier, secondBarrier, r_f
-      );
-      if (closedFormPrice > 0) {
-        return closedFormPrice;
+        const closedFormPrice = this.calculateBarrierOptionClosedForm(
+          type, S, K, r_d, t, sigma, barrier, secondBarrier, r_f
+        );
+        if (closedFormPrice > 0) {
+          return closedFormPrice;
       }
       
       // Fallback to Monte Carlo if closed-form fails
