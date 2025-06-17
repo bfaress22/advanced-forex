@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Layout } from "@/components/Layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { toast } from "@/components/ui/use-toast";
 import { 
   LineChart, 
   Line, 
@@ -31,52 +33,371 @@ import {
   Zap,
   Play,
   Download,
-  Settings
+  Settings,
+  RefreshCw,
+  Shield,
+  DollarSign,
+  RotateCcw,
+  Calendar,
+  Percent
 } from "lucide-react";
+import StrategyImportService, { HedgingInstrument } from "@/services/StrategyImportService";
+import { PricingService } from "@/services/PricingService";
+
+// Interface pour les paramètres de marché par devise
+interface CurrencyMarketData {
+  spot: number;
+  volatility: number;
+  domesticRate: number;
+  foreignRate: number;
+}
+
+// Interface pour les résultats de stress test
+interface StressTestResult {
+  instrumentId: string;
+  instrumentType: string;
+  currency: string;
+  originalMTM: number;
+  stressedMTM: number;
+  mtmChange: number;
+  mtmChangePercent: number;
+  originalTodayPrice: number;
+  stressedTodayPrice: number;
+  volatilityShock: number;
+  spotShock: number;
+}
 
 const RiskAnalysis = () => {
-  const [selectedScenario, setSelectedScenario] = useState("stress-test");
-  const [volatilityShock, setVolatilityShock] = useState([20]);
-  const [currencyShock, setCurrencyShock] = useState([10]);
-  const [timeHorizon, setTimeHorizon] = useState([30]);
+  // États pour les instruments réels
+  const [instruments, setInstruments] = useState<HedgingInstrument[]>([]);
+  const [importService] = useState(() => StrategyImportService.getInstance());
 
-  // Sample scenario data
-  const scenarioResults = [
-    { scenario: "Base Case", pnl: 0, probability: 40 },
-    { scenario: "Bull Market", pnl: 125000, probability: 20 },
-    { scenario: "Bear Market", pnl: -180000, probability: 15 },
-    { scenario: "High Volatility", pnl: -95000, probability: 15 },
-    { scenario: "Currency Crisis", pnl: -350000, probability: 10 }
-  ];
+  // États pour les paramètres de marché (original et stressé)
+  const [baseMarketData, setBaseMarketData] = useState<{ [currency: string]: CurrencyMarketData }>({});
+  const [stressedMarketData, setStressedMarketData] = useState<{ [currency: string]: CurrencyMarketData }>({});
+  
+  // États pour les volatilités individuelles des instruments
+  const [instrumentVolatilities, setInstrumentVolatilities] = useState<{ [instrumentId: string]: number }>({});
+  
+  // États pour les dates
+  const [baseValuationDate, setBaseValuationDate] = useState(new Date().toISOString().split('T')[0]);
+  const [stressedValuationDate, setStressedValuationDate] = useState(new Date().toISOString().split('T')[0]);
+  
+  // États pour les résultats
+  const [stressTestResults, setStressTestResults] = useState<StressTestResult[]>([]);
+  const [isRunningStressTest, setIsRunningStressTest] = useState(false);
+  
+  // États pour les contrôles de stress test
+  const [selectedScenario, setSelectedScenario] = useState("custom");
+  const [globalVolatilityShock, setGlobalVolatilityShock] = useState([0]);
+  const [timeShift, setTimeShift] = useState([0]);
 
-  const varData = [
-    { confidence: "95%", var: 185000, expected_shortfall: 245000 },
-    { confidence: "99%", var: 295000, expected_shortfall: 385000 },
-    { confidence: "99.9%", var: 485000, expected_shortfall: 625000 }
-  ];
+  // Charger les instruments au démarrage
+  useEffect(() => {
+    const loadInstruments = () => {
+      const loadedInstruments = importService.getHedgingInstruments();
+      setInstruments(loadedInstruments);
+      
+      // Initialiser les données de marché pour chaque devise
+      const currencies = getUniqueCurrencies(loadedInstruments);
+      const marketData: { [currency: string]: CurrencyMarketData } = {};
+      
+      currencies.forEach(currency => {
+        marketData[currency] = getDefaultMarketDataForCurrency(currency);
+      });
+      
+      setBaseMarketData(marketData);
+      setStressedMarketData({ ...marketData });
+      
+      // Initialiser les volatilités individuelles
+      const volatilities: { [instrumentId: string]: number } = {};
+      loadedInstruments.forEach(instrument => {
+        volatilities[instrument.id] = instrument.volatility || 20;
+      });
+      setInstrumentVolatilities(volatilities);
+    };
 
-  const currencyBreakdown = [
-    { currency: "EUR", exposure: 2500000, var_95: 125000, color: "#8884d8" },
-    { currency: "GBP", exposure: 1800000, var_95: 98000, color: "#82ca9d" },
-    { currency: "JPY", exposure: 300000, var_95: 25000, color: "#ffc658" },
-    { currency: "CHF", exposure: 950000, var_95: 42000, color: "#ff7300" }
-  ];
+    loadInstruments();
 
-  const timeSeries = [
-    { date: "2024-01", pnl: 15000, cumulative: 15000 },
-    { date: "2024-02", pnl: -25000, cumulative: -10000 },
-    { date: "2024-03", pnl: 45000, cumulative: 35000 },
-    { date: "2024-04", pnl: -15000, cumulative: 20000 },
-    { date: "2024-05", pnl: 35000, cumulative: 55000 },
-    { date: "2024-06", pnl: -60000, cumulative: -5000 }
-  ];
+    // Écouter les mises à jour des instruments
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'hedgingInstruments') {
+        loadInstruments();
+      }
+    };
 
-  const stressTestResults = [
-    { factor: "EUR/USD -10%", impact: -185000, hedged_impact: -92500 },
-    { factor: "GBP/USD -15%", impact: -270000, hedged_impact: -54000 },
-    { factor: "USD/JPY +20%", impact: 60000, hedged_impact: 18000 },
-    { factor: "Volatility +50%", impact: -125000, hedged_impact: -37500 }
-  ];
+    const handleCustomUpdate = () => {
+      loadInstruments();
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('hedgingInstrumentsUpdated', handleCustomUpdate);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('hedgingInstrumentsUpdated', handleCustomUpdate);
+    };
+  }, [importService]);
+
+  // Mettre à jour la date stressée quand le time shift change
+  useEffect(() => {
+    const baseDate = new Date(baseValuationDate);
+    const stressedDate = new Date(baseDate);
+    stressedDate.setDate(stressedDate.getDate() + timeShift[0]);
+    setStressedValuationDate(stressedDate.toISOString().split('T')[0]);
+  }, [baseValuationDate, timeShift]);
+
+  // Fonctions utilitaires (identiques à HedgingInstruments)
+  const getUniqueCurrencies = (instruments: HedgingInstrument[]): string[] => {
+    const currencies = new Set<string>();
+    instruments.forEach(instrument => {
+      if (instrument.currency) {
+        currencies.add(instrument.currency);
+      }
+    });
+    return Array.from(currencies).sort();
+  };
+
+  const getDefaultMarketDataForCurrency = (currency: string): CurrencyMarketData => {
+    const defaultData: { [key: string]: CurrencyMarketData } = {
+      'EUR/USD': { spot: 1.0850, volatility: 20, domesticRate: 1.0, foreignRate: 0.5 },
+      'GBP/USD': { spot: 1.2650, volatility: 22, domesticRate: 1.0, foreignRate: 1.5 },
+      'USD/JPY': { spot: 149.50, volatility: 18, domesticRate: 1.0, foreignRate: 0.1 },
+      'USD/CHF': { spot: 0.9125, volatility: 16, domesticRate: 1.0, foreignRate: 0.25 },
+      'AUD/USD': { spot: 0.6750, volatility: 24, domesticRate: 1.0, foreignRate: 2.0 },
+      'USD/CAD': { spot: 1.3425, volatility: 19, domesticRate: 1.0, foreignRate: 1.25 },
+    };
+    
+    return defaultData[currency] || { spot: 1.0000, volatility: 20, domesticRate: 1.0, foreignRate: 1.0 };
+  };
+
+  const calculateTimeToMaturity = (maturityDate: string, valuationDate: string): number => {
+    const maturity = new Date(maturityDate);
+    const valuation = new Date(valuationDate);
+    const diffTime = maturity.getTime() - valuation.getTime();
+    const diffDays = diffTime / (1000 * 3600 * 24);
+    return Math.max(0, diffDays / 365.25);
+  };
+
+  // Fonction de calcul MTM identique à HedgingInstruments
+  const calculateInstrumentMTM = (
+    instrument: HedgingInstrument, 
+    marketData: { [currency: string]: CurrencyMarketData },
+    valuationDate: string,
+    useStressedVolatility: boolean = false
+  ): { originalPrice: number; todayPrice: number; mtm: number } => {
+    const currencyData = marketData[instrument.currency];
+    if (!currencyData) {
+      return { originalPrice: 0, todayPrice: 0, mtm: 0 };
+    }
+    
+    const r_d = currencyData.domesticRate / 100;
+    const r_f = currencyData.foreignRate / 100;
+    const currentSpot = currencyData.spot;
+    
+    // Utiliser la volatilité stressée si demandée
+    let sigma;
+    if (useStressedVolatility && instrumentVolatilities[instrument.id]) {
+      sigma = instrumentVolatilities[instrument.id] / 100;
+    } else if (instrument.impliedVolatility) {
+      sigma = instrument.impliedVolatility / 100;
+    } else if (instrument.originalComponent && instrument.originalComponent.volatility) {
+      sigma = instrument.originalComponent.volatility / 100;
+    } else if (instrument.volatility) {
+      sigma = instrument.volatility / 100;
+    } else {
+      sigma = currencyData.volatility / 100;
+    }
+    
+    const timeToMaturity = calculateTimeToMaturity(instrument.maturity, valuationDate);
+    const S = currentSpot * Math.exp((r_d - r_f) * timeToMaturity);
+    
+    if (timeToMaturity <= 0) {
+      return { originalPrice: 0, todayPrice: 0, mtm: 0 };
+    }
+
+    const K = instrument.strike || S;
+    const optionType = instrument.type.toLowerCase();
+    
+    // Calculer le prix aujourd'hui avec la même logique que HedgingInstruments
+    let todayPrice = 0;
+    
+    if (optionType.includes('knock-out') || optionType.includes('knock-in') || 
+        optionType.includes('barrier') || optionType.includes('reverse')) {
+      const barrier = instrument.barrier;
+      const secondBarrier = instrument.secondBarrier;
+      
+      if (barrier) {
+        let pricingType = "";
+       
+        if (optionType.includes('double')) {
+          if (optionType.includes('knock-out')) {
+            pricingType = optionType.includes('call') ? "call-double-knockout" : "put-double-knockout";
+          } else if (optionType.includes('knock-in')) {
+            pricingType = optionType.includes('call') ? "call-double-knockin" : "put-double-knockin";
+          }
+        } else if (optionType.includes('knock-out')) {
+          if (optionType.includes('reverse')) {
+            pricingType = optionType.includes('call') ? "call-reverse-knockout" : "put-reverse-knockout";
+          } else {
+            pricingType = optionType.includes('call') ? "call-knockout" : "put-knockout";
+          }
+        } else if (optionType.includes('knock-in')) {
+          pricingType = optionType.includes('call') ? "call-knockin" : "put-knockin";
+        }
+        
+        if (pricingType) {
+          todayPrice = PricingService.calculateBarrierOptionClosedForm(
+            pricingType, S, K, r_d, timeToMaturity, sigma, barrier, secondBarrier, r_f
+          );
+        }
+      }
+    } else if (optionType.includes('touch') || optionType.includes('binary') || optionType.includes('digital')) {
+      const barrier = instrument.barrier || K;
+      const rebate = instrument.rebate || 5;
+      
+      todayPrice = PricingService.calculateDigitalOptionPrice(
+        optionType, S, K, r_d, timeToMaturity, sigma, barrier, instrument.secondBarrier, 10000, rebate
+      );
+    } else if (optionType === 'vanilla call' || (optionType.includes('call') && !optionType.includes('knock'))) {
+      todayPrice = PricingService.calculateGarmanKohlhagenPrice('call', S, K, r_d, r_f, timeToMaturity, sigma);
+    } else if (optionType === 'vanilla put' || (optionType.includes('put') && !optionType.includes('knock'))) {
+      todayPrice = PricingService.calculateGarmanKohlhagenPrice('put', S, K, r_d, r_f, timeToMaturity, sigma);
+    } else if (optionType === 'forward') {
+      const forward = S * Math.exp((r_d - r_f) * timeToMaturity);
+      todayPrice = (forward - K) * Math.exp(-r_d * timeToMaturity);
+    } else if (optionType === 'swap') {
+      todayPrice = S * Math.exp((r_d - r_f) * timeToMaturity);
+    }
+    
+    // Calculer le MTM
+    const originalPrice = instrument.realOptionPrice || instrument.premium || 0;
+    const quantity = instrument.quantity || 1;
+    const isShort = quantity < 0;
+    
+    let mtmValue;
+    if (isShort) {
+      mtmValue = originalPrice - todayPrice;
+    } else {
+      mtmValue = todayPrice - originalPrice;
+    }
+    
+    const mtm = mtmValue * Math.abs(instrument.notional);
+    
+    return { originalPrice, todayPrice, mtm };
+  };
+
+  // Fonction principale de stress testing
+  const runStressTest = async () => {
+    setIsRunningStressTest(true);
+    
+    try {
+      const results: StressTestResult[] = [];
+      
+      // Calculer pour chaque instrument
+      for (const instrument of instruments) {
+        // Calculer MTM original (avec paramètres de base)
+        const originalResult = calculateInstrumentMTM(instrument, baseMarketData, baseValuationDate, false);
+        
+        // Calculer MTM stressé (avec paramètres stressés)
+        const stressedResult = calculateInstrumentMTM(instrument, stressedMarketData, stressedValuationDate, true);
+        
+        // Calculer les chocs appliqués
+        const baseSpot = baseMarketData[instrument.currency]?.spot || 1;
+        const stressedSpot = stressedMarketData[instrument.currency]?.spot || baseSpot;
+        const spotShock = ((stressedSpot - baseSpot) / baseSpot) * 100;
+        
+        const baseVol = instrument.volatility || 20;
+        const stressedVol = instrumentVolatilities[instrument.id] || baseVol;
+        const volatilityShock = stressedVol - baseVol;
+        
+        const mtmChange = stressedResult.mtm - originalResult.mtm;
+        const mtmChangePercent = originalResult.mtm !== 0 ? (mtmChange / Math.abs(originalResult.mtm)) * 100 : 0;
+        
+        results.push({
+          instrumentId: instrument.id,
+          instrumentType: instrument.type,
+          currency: instrument.currency,
+          originalMTM: originalResult.mtm,
+          stressedMTM: stressedResult.mtm,
+          mtmChange,
+          mtmChangePercent,
+          originalTodayPrice: originalResult.todayPrice,
+          stressedTodayPrice: stressedResult.todayPrice,
+          volatilityShock,
+          spotShock
+        });
+      }
+      
+      setStressTestResults(results);
+      
+      const totalMTMChange = results.reduce((sum, result) => sum + result.mtmChange, 0);
+      
+      toast({
+        title: "Stress Test Terminé",
+        description: `Impact total: ${totalMTMChange >= 0 ? '+' : ''}${formatCurrency(totalMTMChange)}`,
+        variant: totalMTMChange >= 0 ? "default" : "destructive"
+      });
+      
+    } catch (error) {
+      toast({
+        title: "Erreur de Stress Test",
+        description: "Échec du calcul. Vérifiez vos paramètres.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsRunningStressTest(false);
+    }
+  };
+
+  // Fonctions de mise à jour des paramètres
+  const updateSpotRate = (currency: string, newSpot: number) => {
+    setStressedMarketData(prev => ({
+      ...prev,
+      [currency]: {
+        ...prev[currency],
+        spot: newSpot
+      }
+    }));
+  };
+
+  const updateInstrumentVolatility = (instrumentId: string, newVolatility: number) => {
+    setInstrumentVolatilities(prev => ({
+      ...prev,
+      [instrumentId]: newVolatility
+    }));
+  };
+
+  const applyGlobalVolatilityShock = () => {
+    const shock = globalVolatilityShock[0];
+    const newVolatilities: { [instrumentId: string]: number } = {};
+    
+    instruments.forEach(instrument => {
+      const baseVol = instrument.volatility || 20;
+      newVolatilities[instrument.id] = baseVol + shock;
+    });
+    
+    setInstrumentVolatilities(newVolatilities);
+  };
+
+  const resetToBaseParameters = () => {
+    setStressedMarketData({ ...baseMarketData });
+    
+    const resetVolatilities: { [instrumentId: string]: number } = {};
+    instruments.forEach(instrument => {
+      resetVolatilities[instrument.id] = instrument.volatility || 20;
+    });
+    setInstrumentVolatilities(resetVolatilities);
+    
+    setGlobalVolatilityShock([0]);
+    setTimeShift([0]);
+    setStressedValuationDate(baseValuationDate);
+    
+    toast({
+      title: "Paramètres Réinitialisés",
+      description: "Tous les paramètres ont été remis aux valeurs de base"
+    });
+  };
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -90,307 +411,383 @@ const RiskAnalysis = () => {
     return value >= 0 ? "text-green-600" : "text-red-600";
   };
 
-  const runScenarioAnalysis = () => {
-    // Placeholder for scenario analysis logic
-    console.log("Running scenario analysis with:", {
-      scenario: selectedScenario,
-      volatilityShock: volatilityShock[0],
-      currencyShock: currencyShock[0],
-      timeHorizon: timeHorizon[0]
-    });
+  const getImpactSeverity = (changePercent: number) => {
+    const abs = Math.abs(changePercent);
+    if (abs < 5) return "low";
+    if (abs < 15) return "medium";
+    return "high";
   };
+
+  const getSeverityColor = (severity: string) => {
+    switch (severity) {
+      case "low": return "text-green-600";
+      case "medium": return "text-yellow-600";
+      case "high": return "text-red-600";
+      default: return "text-gray-600";
+    }
+  };
+
+  // Calculer les métriques globales
+  const totalOriginalMTM = stressTestResults.reduce((sum, result) => sum + result.originalMTM, 0);
+  const totalStressedMTM = stressTestResults.reduce((sum, result) => sum + result.stressedMTM, 0);
+  const totalMTMChange = totalStressedMTM - totalOriginalMTM;
+  const totalMTMChangePercent = totalOriginalMTM !== 0 ? (totalMTMChange / Math.abs(totalOriginalMTM)) * 100 : 0;
+
+  const currencies = getUniqueCurrencies(instruments);
 
   return (
     <Layout 
       breadcrumbs={[
         { label: "Dashboard", href: "/" },
-        { label: "Risk Analysis" }
+        { label: "Analyse des Risques & Stress Testing" }
       ]}
     >
-      {/* Risk Metrics Overview */}
+      {/* Métriques de Risque */}
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">VaR (95%)</CardTitle>
+            <CardTitle className="text-sm font-medium">MTM Portfolio Original</CardTitle>
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">$185K</div>
+            <div className={`text-2xl font-bold ${getPnLColor(totalOriginalMTM)}`}>
+              {formatCurrency(totalOriginalMTM)}
+            </div>
             <p className="text-xs text-muted-foreground">
-              1-day Value at Risk
+              {instruments.length} instruments
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Expected Shortfall</CardTitle>
+            <CardTitle className="text-sm font-medium">MTM Stressé</CardTitle>
             <TrendingDown className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">$245K</div>
+            <div className={`text-2xl font-bold ${getPnLColor(totalStressedMTM)}`}>
+              {formatCurrency(totalStressedMTM)}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Conditional VaR (95%)
+              Après stress testing
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Stress Test</CardTitle>
-            <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Impact Total</CardTitle>
+            <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">$350K</div>
+            <div className={`text-2xl font-bold ${getPnLColor(totalMTMChange)}`}>
+              {totalMTMChange >= 0 ? '+' : ''}{formatCurrency(totalMTMChange)}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Worst case scenario
+              {totalMTMChangePercent >= 0 ? '+' : ''}{totalMTMChangePercent.toFixed(1)}%
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Risk Utilization</CardTitle>
-            <Target className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Instruments à Risque</CardTitle>
+            <Shield className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-yellow-600">74%</div>
+            <div className="text-2xl font-bold text-red-600">
+              {stressTestResults.filter(r => getImpactSeverity(r.mtmChangePercent) === "high").length}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Of allocated limit
+              Impact &gt; 15%
             </p>
           </CardContent>
         </Card>
       </div>
 
+      {/* Configuration des Stress Tests */}
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Scenario Analysis */}
+        {/* Contrôles de Stress Test */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Zap className="h-5 w-5" />
-              Scenario Analysis
+              Configuration des Analyses
             </CardTitle>
             <CardDescription>
-              Run custom stress tests and scenario analysis
+              Choquer les paramètres et recalculer les MTM en temps réel
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4">
-              <div>
-                <Label htmlFor="scenario-type">Scenario Type</Label>
-                <Select value={selectedScenario} onValueChange={setSelectedScenario}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="stress-test">Stress Test</SelectItem>
-                    <SelectItem value="historical">Historical Simulation</SelectItem>
-                    <SelectItem value="monte-carlo">Monte Carlo</SelectItem>
-                    <SelectItem value="custom">Custom Scenario</SelectItem>
-                  </SelectContent>
-                </Select>
+            {/* Date de Valuation */}
+            <div>
+              <Label className="flex items-center gap-2 mb-2">
+                <Calendar className="h-4 w-4" />
+                Date de Valuation
+              </Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-sm text-muted-foreground">Base</Label>
+                  <Input
+                    type="date"
+                    value={baseValuationDate}
+                    onChange={(e) => setBaseValuationDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-sm text-muted-foreground">Stressée (+{timeShift[0]} jours)</Label>
+                  <Input
+                    type="date"
+                    value={stressedValuationDate}
+                    readOnly
+                    className="bg-muted"
+                  />
+                </div>
               </div>
-
-              <div>
-                <Label>Volatility Shock: {volatilityShock[0]}%</Label>
+              <div className="mt-2">
+                <Label>Décalage Temporel: {timeShift[0]} jours</Label>
                 <Slider
-                  value={volatilityShock}
-                  onValueChange={setVolatilityShock}
-                  max={100}
-                  min={0}
-                  step={5}
-                  className="mt-2"
-                />
-              </div>
-
-              <div>
-                <Label>Currency Shock: ±{currencyShock[0]}%</Label>
-                <Slider
-                  value={currencyShock}
-                  onValueChange={setCurrencyShock}
-                  max={50}
-                  min={0}
-                  step={1}
-                  className="mt-2"
-                />
-              </div>
-
-              <div>
-                <Label>Time Horizon: {timeHorizon[0]} days</Label>
-                <Slider
-                  value={timeHorizon}
-                  onValueChange={setTimeHorizon}
+                  value={timeShift}
+                  onValueChange={setTimeShift}
                   max={365}
-                  min={1}
+                  min={-180}
                   step={1}
                   className="mt-2"
                 />
               </div>
+            </div>
 
-              <div className="flex gap-2">
-                <Button onClick={runScenarioAnalysis} className="flex-1">
+            {/* Choc Global de Volatilité */}
+            <div>
+              <Label className="flex items-center gap-2 mb-2">
+                <Percent className="h-4 w-4" />
+                Choc Global Volatilité: {globalVolatilityShock[0] >= 0 ? '+' : ''}{globalVolatilityShock[0]}%
+              </Label>
+              <Slider
+                value={globalVolatilityShock}
+                onValueChange={setGlobalVolatilityShock}
+                max={100}
+                min={-50}
+                step={1}
+                className="mb-2"
+              />
+              <Button 
+                size="sm" 
+                onClick={applyGlobalVolatilityShock}
+                className="w-full"
+              >
+                Appliquer à Tous les Instruments
+              </Button>
+            </div>
+
+            {/* Boutons de Contrôle */}
+            <div className="flex gap-2">
+              <Button 
+                onClick={runStressTest} 
+                className="flex-1"
+                disabled={isRunningStressTest}
+              >
+                {isRunningStressTest ? (
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
                   <Play className="h-4 w-4 mr-2" />
-                  Run Analysis
-                </Button>
-                <Button variant="outline">
-                  <Settings className="h-4 w-4" />
-                </Button>
-              </div>
+                )}
+                {isRunningStressTest ? "Calcul..." : "Lancer Stress Test"}
+              </Button>
+              <Button variant="outline" onClick={resetToBaseParameters}>
+                <RotateCcw className="h-4 w-4" />
+              </Button>
             </div>
           </CardContent>
         </Card>
 
-        {/* VaR Breakdown */}
+        {/* Chocs par Devise */}
         <Card>
           <CardHeader>
-            <CardTitle>Value at Risk Breakdown</CardTitle>
-            <CardDescription>Risk metrics by confidence level</CardDescription>
+            <CardTitle>Chocs de Spot par Devise</CardTitle>
+            <CardDescription>Modifier les taux de change spot</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              {varData.map((item) => (
-                <div key={item.confidence} className="flex items-center justify-between p-3 border rounded-lg">
-                  <div>
-                    <div className="font-medium">{item.confidence} Confidence</div>
-                    <div className="text-sm text-muted-foreground">1-day horizon</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-lg font-bold text-red-600">
-                      {formatCurrency(item.var)}
+              {currencies.map(currency => {
+                const baseSpot = baseMarketData[currency]?.spot || 1;
+                const stressedSpot = stressedMarketData[currency]?.spot || baseSpot;
+                const shockPercent = ((stressedSpot - baseSpot) / baseSpot) * 100;
+                
+                return (
+                  <div key={currency} className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <Badge variant="outline" className="font-mono">{currency}</Badge>
+                      <span className={`text-sm font-mono ${shockPercent !== 0 ? (shockPercent > 0 ? 'text-green-600' : 'text-red-600') : 'text-muted-foreground'}`}>
+                        {shockPercent >= 0 ? '+' : ''}{shockPercent.toFixed(2)}%
+                      </span>
                     </div>
-                    <div className="text-sm text-muted-foreground">
-                      ES: {formatCurrency(item.expected_shortfall)}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Base: {baseSpot.toFixed(4)}</Label>
+                        <Input
+                          type="number"
+                          step="0.0001"
+                          value={stressedSpot.toFixed(4)}
+                          onChange={(e) => updateSpotRate(currency, parseFloat(e.target.value) || baseSpot)}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          onClick={() => updateSpotRate(currency, baseSpot)}
+                          className="w-full"
+                        >
+                          Reset
+                        </Button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Charts Section */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* P&L Time Series */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Historical P&L</CardTitle>
-            <CardDescription>Monthly P&L and cumulative performance</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={timeSeries}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis tickFormatter={(value) => `$${(value/1000).toFixed(0)}K`} />
-                <Tooltip 
-                  formatter={(value: number) => [formatCurrency(value), ""]}
-                  labelFormatter={(label) => `Month: ${label}`}
-                />
-                <Line type="monotone" dataKey="pnl" stroke="#8884d8" strokeWidth={2} />
-                <Line type="monotone" dataKey="cumulative" stroke="#82ca9d" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        {/* Currency Risk Breakdown */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Risk by Currency</CardTitle>
-            <CardDescription>VaR contribution by currency pair</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  data={currencyBreakdown}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ currency, percent }) => `${currency} ${(percent * 100).toFixed(0)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="var_95"
-                >
-                  {currencyBreakdown.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value: number) => formatCurrency(value)} />
-              </PieChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Scenario Results */}
+      {/* Volatilités par Instrument */}
       <Card>
         <CardHeader>
-          <div className="flex justify-between items-center">
-            <div>
-              <CardTitle>Scenario Results</CardTitle>
-              <CardDescription>Potential P&L under different market scenarios</CardDescription>
-            </div>
-            <Button variant="outline" size="sm">
-              <Download className="h-4 w-4 mr-2" />
-              Export
-            </Button>
-          </div>
+          <CardTitle>Chocs de Volatilité par Instrument</CardTitle>
+          <CardDescription>
+            Modifier la volatilité de chaque instrument individuellement
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="scenarios">
-            <TabsList>
-              <TabsTrigger value="scenarios">Market Scenarios</TabsTrigger>
-              <TabsTrigger value="stress-tests">Stress Tests</TabsTrigger>
-            </TabsList>
-            
-            <TabsContent value="scenarios" className="mt-4">
-              <div className="space-y-3">
-                {scenarioResults.map((scenario, index) => (
-                  <div key={index} className="flex items-center justify-between p-4 border rounded-lg">
-                    <div className="flex items-center gap-3">
-                      <Badge variant="outline">{scenario.probability}%</Badge>
-                      <div>
-                        <div className="font-medium">{scenario.scenario}</div>
-                        <div className="text-sm text-muted-foreground">
-                          Probability of occurrence
-                        </div>
-                      </div>
-                    </div>
-                    <div className={`text-lg font-bold ${getPnLColor(scenario.pnl)}`}>
-                      {formatCurrency(scenario.pnl)}
-                    </div>
+          <div className="grid gap-3">
+            {instruments.map(instrument => {
+              const baseVol = instrument.volatility || 20;
+              const stressedVol = instrumentVolatilities[instrument.id] || baseVol;
+              const volShock = stressedVol - baseVol;
+              
+              return (
+                <div key={instrument.id} className="flex items-center gap-4 p-3 border rounded-lg">
+                  <div className="flex-1">
+                    <div className="font-medium text-sm">{instrument.id}</div>
+                    <div className="text-xs text-muted-foreground">{instrument.type} • {instrument.currency}</div>
                   </div>
-                ))}
-              </div>
-            </TabsContent>
-            
-            <TabsContent value="stress-tests" className="mt-4">
-              <div className="space-y-3">
-                {stressTestResults.map((test, index) => (
-                  <div key={index} className="flex items-center justify-between p-4 border rounded-lg">
-                    <div>
-                      <div className="font-medium">{test.factor}</div>
-                      <div className="text-sm text-muted-foreground">
-                        Market stress scenario
+                  <div className="flex items-center gap-3">
+                    <div className="text-xs text-center">
+                      <div className="text-muted-foreground">Base</div>
+                      <div className="font-mono">{baseVol.toFixed(1)}%</div>
+                    </div>
+                    <div className="w-32">
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={stressedVol.toFixed(1)}
+                        onChange={(e) => updateInstrumentVolatility(instrument.id, parseFloat(e.target.value) || baseVol)}
+                        className="text-sm text-center"
+                      />
+                    </div>
+                    <div className="text-xs text-center min-w-[50px]">
+                      <div className="text-muted-foreground">Choc</div>
+                      <div className={`font-mono ${volShock !== 0 ? (volShock > 0 ? 'text-green-600' : 'text-red-600') : 'text-muted-foreground'}`}>
+                        {volShock >= 0 ? '+' : ''}{volShock.toFixed(1)}%
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className={`font-bold ${getPnLColor(test.impact)}`}>
-                        {formatCurrency(test.impact)}
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        After hedge: {formatCurrency(test.hedged_impact)}
-                      </div>
-                    </div>
+                    <Button 
+                      size="sm" 
+                      variant="outline"
+                      onClick={() => updateInstrumentVolatility(instrument.id, baseVol)}
+                    >
+                      Reset
+                    </Button>
                   </div>
-                ))}
-              </div>
-            </TabsContent>
-          </Tabs>
+                </div>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
+
+      {/* Résultats du Stress Test */}
+      {stressTestResults.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex justify-between items-center">
+              <div>
+                <CardTitle>Résultats du Stress Test</CardTitle>
+                <CardDescription>
+                  Impact détaillé par instrument avec recalcul MTM
+                </CardDescription>
+              </div>
+              <Button variant="outline" size="sm">
+                <Download className="h-4 w-4 mr-2" />
+                Exporter
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Instrument</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Devise</TableHead>
+                  <TableHead>MTM Original</TableHead>
+                  <TableHead>MTM Stressé</TableHead>
+                  <TableHead>Changement</TableHead>
+                  <TableHead>%</TableHead>
+                  <TableHead>Today Price Δ</TableHead>
+                  <TableHead>Chocs Appliqués</TableHead>
+                  <TableHead>Sévérité</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stressTestResults.map((result) => {
+                  const severity = getImpactSeverity(result.mtmChangePercent);
+                  const priceChange = result.stressedTodayPrice - result.originalTodayPrice;
+                  
+                  return (
+                    <TableRow key={result.instrumentId}>
+                      <TableCell className="font-medium">{result.instrumentId}</TableCell>
+                      <TableCell className="text-sm">{result.instrumentType}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline">{result.currency}</Badge>
+                      </TableCell>
+                      <TableCell className={`font-mono ${getPnLColor(result.originalMTM)}`}>
+                        {formatCurrency(result.originalMTM)}
+                      </TableCell>
+                      <TableCell className={`font-mono ${getPnLColor(result.stressedMTM)}`}>
+                        {formatCurrency(result.stressedMTM)}
+                      </TableCell>
+                      <TableCell className={`font-mono ${getPnLColor(result.mtmChange)}`}>
+                        {result.mtmChange >= 0 ? '+' : ''}{formatCurrency(result.mtmChange)}
+                      </TableCell>
+                      <TableCell className={`font-mono ${getPnLColor(result.mtmChangePercent)}`}>
+                        {result.mtmChangePercent >= 0 ? '+' : ''}{result.mtmChangePercent.toFixed(1)}%
+                      </TableCell>
+                      <TableCell className={`font-mono text-xs ${getPnLColor(priceChange)}`}>
+                        {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(4)}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        <div>Vol: {result.volatilityShock >= 0 ? '+' : ''}{result.volatilityShock.toFixed(1)}%</div>
+                        <div>Spot: {result.spotShock >= 0 ? '+' : ''}{result.spotShock.toFixed(2)}%</div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge 
+                          variant={severity === "low" ? "default" : severity === "medium" ? "secondary" : "destructive"}
+                          className="capitalize"
+                        >
+                          {severity}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
     </Layout>
   );
 };
